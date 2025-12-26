@@ -1,0 +1,57 @@
+# Python cache y bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# Carpetas de build y distribución
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Paquetes .deb generados
+*.deb
+
+# PyInstaller
+*.spec
+
+# Logs y archivos temporales
+*.log
+/tmp/
+/dev/shm/
+
+# Virtual environments (si usas venv o uv)
+venv/
+.env/
+.venv/
+
+# Archivos de configuración local / IDE
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Archivos generados por herramientas
+pyside_report.json
+python3-requirements.json
+requirements_temp.txt
+flatpak-pip-generator
+generate_pyside_manifest.py
+
+# Copias y pruebas locales
+copy/
+komorebi-runner.sh
+
+# Lock files (si no quieres versionar uv.lock, puedes quitar esta línea)
+uv.lock
+
+# Carpetas de cache personalizadas
+.cache/
+*.cache
+
+# Flatpak build dir (si lo creas en la raíz)
+build-dir/
+.flatpak-builder/

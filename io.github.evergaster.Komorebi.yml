@@ -1,0 +1,42 @@
+app-id: io.github.evergaster.Komorebi
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: komorebi
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=xdg-run/dconf
+  - --filesystem=~/.config/dconf:ro
+  - --talk-name=ca.desrt.dconf
+  - --env=DCONF_USER_CONFIG_DIR=.config/dconf
+  - --own-name=org.mpris.MediaPlayer2.vlc.*
+  - --env=VLC_PLUGIN_PATH=/app/lib/vlc/plugins
+
+modules:
+  # 1. VLC (Usando shared-modules)
+  # Clonar: git clone https://github.com/flathub/shared-modules.git
+  - shared-modules/vlc/vlc.json
+
+  # 2. Dependencias de Python
+  # Generar: flatpak-pip-generator -r requirements.txt --output python3-requirements
+  - python3-requirements.json
+
+  # 3. La aplicación
+  - name: komorebi
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/share/komorebi
+      - cp -r src icons main.py /app/share/komorebi/
+      - mkdir -p /app/bin
+      - install -m 755 komorebi-runner.sh /app/bin/komorebi
+      - mkdir -p /app/share/applications
+      - install -m 644 io.github.evergaster.Komorebi.desktop /app/share/applications/
+      - mkdir -p /app/share/icons/hicolor/256x256/apps
+      - install -m 644 icons/Komorebi.png /app/share/icons/hicolor/256x256/apps/io.github.evergaster.Komorebi.png
+    sources:
+      - type: dir
+        path: .

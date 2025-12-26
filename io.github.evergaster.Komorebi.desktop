@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Komorebi
+Comment=Fondos de pantalla animados para GNOME Wayland
+Exec=komorebi
+Icon=io.github.evergaster.Komorebi
+Type=Application
+Categories=Utility;DesktopSettings;Settings;
+Terminal=false
+StartupNotify=true
+Keywords=wallpaper;video;background;live;animated;komorebi;
