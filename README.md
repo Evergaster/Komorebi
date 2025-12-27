@@ -1,5 +1,9 @@
 # Komorebi 🍃
 
+<p align="center">
+  <img src="icons/Komorebi.png" alt="Komorebi Logo" width="150"/>
+</p>
+
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg?style=for-the-badge&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20(Wayland)-green.svg?style=for-the-badge&logo=linux&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)
