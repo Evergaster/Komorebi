@@ -1,21 +1,20 @@
 #!/bin/bash
 
-set -e  # Salir inmediatamente si un comando falla
+set -e  
 
-# Colores para el output
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Directorios y rutas
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$PROJECT_DIR/.venv"
-ICON_PATH="$PROJECT_DIR/icons/Komorebi.png"
+# --- CONFIGURACIÓN DE RUTAS PERMANENTES ---
+
+BASE_DIR="$HOME/.local/share/komorebi"
+VENV_DIR="$BASE_DIR/.venv"
 DESKTOP_FILE="$HOME/.local/share/applications/komorebi.desktop"
-WRAPPER_SCRIPT="$PROJECT_DIR/run_komorebi.sh"
 USER_ICON_DIR="$HOME/.local/share/icons"
+WRAPPER_SCRIPT="$BASE_DIR/run_komorebi.sh"
 
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -56,18 +55,32 @@ install_system_deps() {
     esac
 }
 
+deploy_files() {
+    echo -e "${BLUE}Moviendo archivos a la ruta permanente: $BASE_DIR${NC}"
+
+    pkill -f "komorebi" || true
+    
+    mkdir -p "$BASE_DIR"
+    cp -r ./* "$BASE_DIR/"
+    
+    mkdir -p "$USER_ICON_DIR"
+    if [ -f "$BASE_DIR/icons/Komorebi.png" ]; then
+        cp "$BASE_DIR/icons/Komorebi.png" "$USER_ICON_DIR/komorebi.png"
+    fi
+}
+
 install_python_deps() {
-    echo -e "${BLUE}Configurando entorno virtual (con acceso a paquetes de sistema)...${NC}"
+    echo -e "${BLUE}Configurando entorno virtual en la ruta permanente...${NC}"
     
-    [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
-    
-    # --system-site-packages permite usar el 'gi' (Gio) instalado por sudo apt/pacman
+    cd "$BASE_DIR"
+
     python3 -m venv --system-site-packages "$VENV_DIR"
     
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip wheel
-    echo -e "${BLUE}Instalando dependencias de Python en el venv...${NC}"
-    pip install PySide6 python-vlc python-xlib psutil
+    echo -e "${BLUE}Instalando dependencias de Python...${NC}"
+
+    pip install PySide6 python-vlc python-xlib psutil setproctitle
     
     if [ -f "pyproject.toml" ]; then
         pip install -e .
@@ -76,62 +89,66 @@ install_python_deps() {
 }
 
 create_desktop_entry() {
-    echo -e "${BLUE}Configurando icono y acceso directo...${NC}"
-    
-    # 1. Asegurar permisos del wrapper
+    echo -e "${BLUE}Configurando acceso directo y lanzador...${NC}"
+
+    cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+source "\$DIR/.venv/bin/activate"
+export QT_QPA_PLATFORM=xcb
+exec python "\$DIR/main.py" "\$@"
+EOF
     chmod +x "$WRAPPER_SCRIPT"
 
-    # 2. Registrar icono en el sistema del usuario para máxima compatibilidad
-    mkdir -p "$USER_ICON_DIR"
-    if [ -f "$ICON_PATH" ]; then
-        cp "$ICON_PATH" "$USER_ICON_DIR/komorebi.png"
-        FINAL_ICON="$USER_ICON_DIR/komorebi.png"
-    else
-        echo -e "${YELLOW}Icono no encontrado en $ICON_PATH, usando genérico.${NC}"
-        FINAL_ICON="video-display"
-    fi
-
-    # 3. Crear el archivo .desktop con rutas absolutas citadas
     mkdir -p "$HOME/.local/share/applications"
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Name=Komorebi
-Comment=Wallpapers Animados para Linux
+Comment=Wallpapers Animados
 Exec="$WRAPPER_SCRIPT"
-Icon=$FINAL_ICON
+Icon=$USER_ICON_DIR/komorebi.png
 Terminal=false
 Type=Application
-Categories=Utility;Settings;DesktopSettings;
+Categories=Utility;Settings;
 StartupNotify=true
 StartupWMClass=komorebi
 EOF
 
     chmod +x "$DESKTOP_FILE"
 
-    # 4. Refrescar base de datos de GNOME
     if command -v update-desktop-database &> /dev/null; then
         update-desktop-database "$HOME/.local/share/applications"
     fi
-    
-    # Forzar actualización de caché de iconos
+
     touch "$HOME/.local/share/applications"
-    
-    echo -e "${GREEN}✓ Acceso directo creado en: $DESKTOP_FILE${NC}"
 }
 
 uninstall() {
-    echo -e "${YELLOW}Desinstalando Komorebi...${NC}"
+    echo -e "${YELLOW}Eliminando Komorebi de la ruta permanente...${NC}"
     pkill -f "komorebi" || true
-    rm -rf "$VENV_DIR"
+    rm -rf "$BASE_DIR"
     rm -f "$DESKTOP_FILE"
     rm -f "$USER_ICON_DIR/komorebi.png"
     echo -e "${GREEN}✓ Desinstalación completa.${NC}"
 }
 
+install() {
+    check_wayland
+    install_system_deps
+    deploy_files
+    install_python_deps
+    create_desktop_entry
+    
+    echo -e "\n${GREEN}¡INSTALACIÓN COMPLETADA!${NC}"
+    echo -e "Los archivos se han movido a: ${BLUE}$BASE_DIR${NC}"
+    echo -e "${YELLOW}Ya puedes borrar la carpeta del git clone.${NC}"
+    echo -e "Busca 'Komorebi' en tu menú de aplicaciones."
+}
+
 # Ejecución principal
 clear
 echo -e "${BLUE}=========================================${NC}"
-echo -e "${BLUE}    Instalador Komorebi Wallpaper        ${NC}"
+echo -e "${BLUE}    Instalador Komorebi (Permanente)     ${NC}"
 echo -e "${BLUE}=========================================${NC}"
 echo "1) Instalar"
 echo "2) Desinstalar"
@@ -140,21 +157,8 @@ echo -e "${BLUE}=========================================${NC}"
 read -p "Selecciona una opción: " opt
 
 case $opt in
-    1)
-        check_wayland
-        install_system_deps
-        install_python_deps
-        create_desktop_entry
-        echo -e "\n${GREEN}¡INSTALACIÓN COMPLETADA!${NC}"
-        echo -e "Busca 'Komorebi' en tu menú de aplicaciones."
-        ;;
-    2)
-        uninstall
-        ;;
-    3)
-        exit 0
-        ;;
-    *)
-        echo "Opción inválida."
-        ;;
+    1) install ;;
+    2) uninstall ;;
+    3) exit 0 ;;
+    *) echo "Opción inválida." ;;
 esac

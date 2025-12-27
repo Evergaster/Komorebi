@@ -5,11 +5,13 @@ import time
 import os
 import traceback
 
-# Nota: No importes módulos pesados (Qt/BackgroundPlayer) antes de decidir
-# el modo de ejecución; esto evita side-effects (env vars) en el modo GUI.
+import setproctitle
+from PySide6.QtGui import QIcon
+
+# 1. Cambiar el nombre del proceso inmediatamente para el monitor de sistema
+setproctitle.setproctitle("komorebi")
 
 os.environ["QT_MEDIA_BACKEND"] = "gstreamer"  # Por si queda algún fallback
-
 
 SINGLE_INSTANCE_SERVER_NAME = "komorebi_gui_single_instance"
 
@@ -33,14 +35,10 @@ def _notify_existing_instance() -> bool:
 
 
 def _start_single_instance_server(on_message):
-    """Inicia servidor local para single-instance.
-
-    `on_message(str)` se invoca al recibir una orden (p.ej. 'show').
-    """
+    """Inicia servidor local para single-instance."""
     try:
         from PySide6.QtNetwork import QLocalServer
 
-        # Limpiar socket stale de una instancia anterior que crasheó.
         try:
             QLocalServer.removeServer(SINGLE_INSTANCE_SERVER_NAME)
         except Exception:
@@ -72,13 +70,11 @@ def _start_single_instance_server(on_message):
         return None
 
 if __name__ == "__main__":
-    # Modo servicio: permite que el ejecutable PyInstaller se reinvoque a sí mismo.
-    # Engine usa: <exe> --background-player <args-de-background_player>
+    # Modo servicio
     if "--background-player" in sys.argv:
         idx = sys.argv.index("--background-player")
         bg_argv = sys.argv[idx + 1 :]
         from src import background_player
-
         raise SystemExit(background_player.main(bg_argv))
 
     parser = argparse.ArgumentParser()
@@ -89,8 +85,6 @@ if __name__ == "__main__":
     if args.delay:
         time.sleep(args.delay)
 
-    # Si se lanza desde el .desktop y ya hay una instancia corriendo,
-    # reutilizarla (traer ventana al frente) en vez de abrir otra.
     if _notify_existing_instance():
         raise SystemExit(0)
 
@@ -98,6 +92,20 @@ if __name__ == "__main__":
     from src.gui import MainWindow
 
     app = QApplication(sys.argv)
+    
+    # 2. Identidad de la Aplicación (Crítico para GNOME Alt+Tab y Icono)
+    app.setApplicationName("Komorebi")
+    app.setApplicationDisplayName("Komorebi")
+    # Este nombre debe coincidir con el del archivo .desktop (komorebi.desktop)
+    app.setDesktopFileName("komorebi")
+
+    # 3. Cargar el Icono
+    # Buscamos el icono en la carpeta de instalación o local
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(script_dir, "icons", "Komorebi.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     app.setStyle("Fusion")
 
     window = MainWindow()
@@ -111,7 +119,6 @@ if __name__ == "__main__":
             window.activateWindow()
 
     _single_instance_server = _start_single_instance_server(_on_single_instance_message)
-    #window.restore_wallpapers()  # Implementar si guardas estado
 
     try:
         if args.restore_only:
@@ -120,7 +127,6 @@ if __name__ == "__main__":
             window.show()
             sys.exit(app.exec())
     except Exception:
-        # Log de arranque: útil si la app falla al ejecutarse desde el .deb
         try:
             log_path = os.path.expanduser("/tmp/komorebi_startup_error.log")
             with open(log_path, "a", encoding="utf-8") as f:
