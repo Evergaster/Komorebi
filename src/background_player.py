@@ -1,11 +1,3 @@
-"""Servicio de fondo para reproducir wallpapers en Wayland (vía XWayland) usando libVLC.
-
-Objetivo: reducir consumo vs decodificar frames en Python.
-
-Se invoca con:
-    - Modo source: python -m src.background_player /ruta/video [--pause-on-max]
-    - Modo PyInstaller: <komorebi> --background-player /ruta/video [--pause-on-max]
-"""
 
 import os
 import sys

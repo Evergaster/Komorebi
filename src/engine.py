@@ -156,9 +156,5 @@ class WallpaperEngine:
 
     def update_settings(self, config):
         """Actualiza la configuración de los wallpapers activos"""
-        # En la arquitectura actual, esto implicaría reiniciar los wallpapers
-        # o enviar un comando de actualización si el servicio lo soportara.
-        # Por ahora, simplemente reiniciamos los que están corriendo si es necesario.
-        # Pero para evitar cortes, solo lo haremos si es crítico.
-        # Implementación futura: enviar comando 'update' al servicio.
+
         pass

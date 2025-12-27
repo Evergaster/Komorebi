@@ -381,7 +381,7 @@ class MainWindow(QMainWindow):
 
     def _init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        icon_path = self._get_resource_path("icons/Komorebi.ico")
+        icon_path = self._get_resource_path("icons/Komorebi.png")
         if os.path.exists(icon_path):
             self.tray_icon.setIcon(QIcon(icon_path))
         else:
@@ -969,15 +969,19 @@ class MainWindow(QMainWindow):
         if enable:
             os.makedirs(autostart_dir, exist_ok=True)
             
-            # Determine path to main.py reliably
-            if getattr(sys, 'frozen', False):
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            wrapper_script = os.path.join(project_root, "run_komorebi.sh")
+            icon_path = os.path.join(project_root, "icons", "Komorebi.png")
+            
+            if os.path.exists(wrapper_script):
+                # Usar el wrapper script generado por el instalador
+                exec_cmd = f'"{wrapper_script}" --restore-only --delay 5'
+            elif getattr(sys, 'frozen', False):
                 # If packaged (e.g. PyInstaller)
                 exec_path = sys.executable
                 exec_cmd = f'"{exec_path}" --restore-only --delay 5'
             else:
-                # If running from source
-                # Assuming gui.py is in src/ and main.py is in root
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Fallback: If running from source without wrapper
                 main_script = os.path.join(project_root, "main.py")
                 exec_cmd = f'"{sys.executable}" "{main_script}" --restore-only --delay 5'
             
@@ -985,14 +989,18 @@ class MainWindow(QMainWindow):
 Type=Application
 Name=Komorebi
 Exec={exec_cmd}
+Icon={icon_path}
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 Comment=Wallpaper Engine Clone
+StartupNotify=false
 """
             try:
                 with open(desktop_file, 'w') as f:
                     f.write(content)
+                # Hacer ejecutable el .desktop por si acaso
+                os.chmod(desktop_file, 0o755)
             except Exception as e:
                 print(f"Error creando autostart: {e}")
         else:

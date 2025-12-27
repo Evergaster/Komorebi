@@ -74,16 +74,16 @@ install_python_deps() {
 
 # Función para crear el acceso directo .desktop
 create_desktop_entry() {
-    echo -e "${BLUE}Creando script de lanzamiento y acceso directo...${NC}"
+    echo -e "${BLUE}Configurando acceso directo...${NC}"
     
-    # Crear script wrapper para asegurar el entorno y directorio de trabajo
+    # Asegurar que el script de lanzamiento tenga permisos de ejecución
     WRAPPER_SCRIPT="$PROJECT_DIR/run_komorebi.sh"
-    cat > "$WRAPPER_SCRIPT" << EOF
-#!/bin/bash
-cd "$PROJECT_DIR"
-"$VENV_DIR/bin/python" main.py
-EOF
-    chmod +x "$WRAPPER_SCRIPT"
+    if [ -f "$WRAPPER_SCRIPT" ]; then
+        chmod +x "$WRAPPER_SCRIPT"
+    else
+        echo -e "${RED}Error: No se encontró $WRAPPER_SCRIPT${NC}"
+        exit 1
+    fi
     
     mkdir -p "$HOME/.local/share/applications"
     
