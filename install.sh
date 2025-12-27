@@ -74,23 +74,39 @@ install_python_deps() {
 
 # Función para crear el acceso directo .desktop
 create_desktop_entry() {
-    echo -e "${BLUE}Creando acceso directo en el menú de aplicaciones...${NC}"
+    echo -e "${BLUE}Creando script de lanzamiento y acceso directo...${NC}"
+    
+    # Crear script wrapper para asegurar el entorno y directorio de trabajo
+    WRAPPER_SCRIPT="$PROJECT_DIR/run_komorebi.sh"
+    cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+cd "$PROJECT_DIR"
+"$VENV_DIR/bin/python" main.py
+EOF
+    chmod +x "$WRAPPER_SCRIPT"
     
     mkdir -p "$HOME/.local/share/applications"
     
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
-Name=Komorebi Wallpaper
+Name=Komorebi
 Comment=Gestor de fondos de pantalla animados
-Exec=$VENV_DIR/bin/python "$PROJECT_DIR/main.py"
+Exec="$WRAPPER_SCRIPT"
 Icon=$ICON_PATH
 Terminal=false
 Type=Application
-Categories=Utility;
+Categories=Utility;Settings;DesktopSettings;
 StartupNotify=false
+StartupWMClass=Komorebi
 EOF
 
     chmod +x "$DESKTOP_FILE"
+    
+    # Intentar actualizar la base de datos de escritorio
+    if command -v update-desktop-database &> /dev/null; then
+        update-desktop-database "$HOME/.local/share/applications"
+    fi
+    
     echo -e "${GREEN}Acceso directo creado en: $DESKTOP_FILE${NC}"
 }
 
