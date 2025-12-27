@@ -97,7 +97,7 @@ if __name__ == "__main__":
     app.setApplicationName("Komorebi")
     app.setApplicationDisplayName("Komorebi")
     # Este nombre debe coincidir con el del archivo .desktop (komorebi.desktop)
-    app.setDesktopFileName("komorebi")
+    app.setDesktopFileName("Komorebi")
 
     # 3. Cargar el Icono
     # Buscamos el icono en la carpeta de instalación o local

@@ -15,7 +15,7 @@ from PySide6.QtGui import QGuiApplication
 PID_DIR = Path("/tmp/komorebi_pids")
 LOG_FILE = Path("/tmp/komorebi_wall.log")
 THUMB_DIR = Path.home() / ".cache" / "komorebi" / "thumbnails"
-
+ROOT_DIR = Path(__file__).parent.parent.absolute()
 
 class WallpaperEngine:
     """Motor de reproducción de wallpapers animados"""
@@ -25,6 +25,7 @@ class WallpaperEngine:
         PID_DIR.mkdir(parents=True, exist_ok=True)
         THUMB_DIR.mkdir(parents=True, exist_ok=True)
         
+        
         # Detectar entorno (solo Wayland soportado)
         self.session = os.environ.get('XDG_SESSION_TYPE', 'x11').lower()
         self.is_gnome = 'GNOME' in os.environ.get('XDG_CURRENT_DESKTOP', '').upper()
@@ -33,7 +34,8 @@ class WallpaperEngine:
         
         if self.is_gnome:
             self._log("⚠️  GNOME Wayland - proceso de fondo sin icono")
-    
+
+
     def get_screen_count(self):
         """Retorna el número de pantallas detectadas"""
         if not QGuiApplication.instance():
@@ -92,8 +94,13 @@ class WallpaperEngine:
         # Lanzamos subprocess.Popen. 
         # Si el servicio ya existe, este proceso enviará el comando y saldrá rápido.
         # Si no existe, se quedará corriendo como el servicio principal.
-        subprocess.Popen(cmd, cwd=os.getcwd(), start_new_session=True, 
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+                    cmd, 
+                    cwd=str(ROOT_DIR), 
+                    start_new_session=True, 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL
+                )
 
     def _send_stop_command(self, screen_index):
         cmd = self._background_player_base_cmd() + [
