@@ -233,7 +233,7 @@ class MainWindow(QMainWindow):
         self._resize_timer.timeout.connect(self.rearrange_grid)
         
         # Set Window Icon
-        icon_path = self._get_resource_path("icons/Komorebi.ico")
+        icon_path = self._get_resource_path("icons/Komorebi.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         

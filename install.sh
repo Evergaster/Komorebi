@@ -59,9 +59,10 @@ install_python_deps() {
     
     source "$VENV_DIR/bin/activate"
     
-    echo -e "${BLUE}Instalando dependencias desde requirements.txt...${NC}"
+    echo -e "${BLUE}Instalando dependencias desde pyproject.toml...${NC}"
     pip install --upgrade pip
-    pip install -r "$PROJECT_DIR/requirements.txt"
+    # Instalar el paquete actual y sus dependencias
+    pip install .
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Dependencias de Python instaladas correctamente.${NC}"
