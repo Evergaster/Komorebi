@@ -878,7 +878,7 @@ class MainWindow(QMainWindow):
                 background-color: {self.colors['card_hover']};
             }}
         """)
-        btn_github.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/evergaster/komorebi"))) 
+        btn_github.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/Evergaster/Komorebi"))) 
         layout.addWidget(btn_github)
         
         btn_issue = QPushButton("  Reportar un error")
@@ -896,7 +896,7 @@ class MainWindow(QMainWindow):
                 background-color: {self.colors['danger_hover']};
             }}
         """)
-        btn_issue.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/evergaster/komorebi/issues")))
+        btn_issue.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/Evergaster/Komorebi/issues")))
         layout.addWidget(btn_issue)
         
         self.stack.addWidget(page)
@@ -1076,12 +1076,6 @@ StartupNotify=false
             
         card_width = 190 # 180 + spacing
         columns = max(1, available_width // card_width)
-        
-        # Remover items del layout pero no borrarlos (setParent(None) los quita del layout)
-        # Nota: setParent(None) en realidad puede destruir el widget si no tiene otra referencia.
-        # Pero los tenemos en self.video_cards, así que está bien.
-        # Sin embargo, QGridLayout::addWidget reparents them back.
-        # Una forma más segura de limpiar el layout sin borrar widgets es takeAt.
         
         while self.grid.count():
             item = self.grid.takeAt(0)

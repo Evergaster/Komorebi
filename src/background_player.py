@@ -1,4 +1,13 @@
 
+
+import vlc
+
+from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import Qt, QTimer, QEvent, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtDBus import QDBusConnection, QDBusMessage
+
 import os
 import sys
 import signal
@@ -13,7 +22,13 @@ from pathlib import Path
 import shutil
 import re
 
-
+import time
+try:
+    from Xlib import X, display as xlib_display
+    from Xlib.error import XError
+    XLIB_AVAILABLE = True
+except ImportError:
+    XLIB_AVAILABLE = False
 _GSETTINGS_KEYS_CACHE: dict[str, set[str]] = {}
 
 
@@ -65,14 +80,10 @@ def _configure_vlc_env() -> str | None:
 
 _VLC_PLUGIN_PATH = _configure_vlc_env()
 
-import vlc
+# Cache global de monitores
+_MONITOR_CACHE = {"data": [], "timestamp": 0, "min_interval": 5.0}
 
-from PySide6.QtWidgets import QApplication, QWidget
-from PySide6.QtCore import Qt, QTimer, QEvent, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtDBus import QDBusConnection, QDBusMessage
-
+# Executor para snapshots asíncronos
 # Forzar backend XCB (XWayland) para que xprop funcione y tengamos XID válido para libVLC.
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 # Desactiva decoraciones del lado del compositor en Qt Wayland.
@@ -218,20 +229,30 @@ def _disable_monitor_config(*, screen_index: int, screen_name: str | None) -> No
     _save_config(data)
 
 
-def _xrandr_monitors() -> list[dict]:
-    """Retorna monitores desde `xrandr --listmonitors` (útil en Wayland+XWayland).
-
+def _xrandr_monitors(force_refresh: bool = False) -> list[dict]:
+    """Retorna monitores desde `xrandr --listmonitors` con cache inteligente.
+    
     Formato típico:
       Monitors: 2
        0: +*eDP-1 1920/344x1080/194+0+0  eDP-1
        1: +HDMI-1 1920/477x1080/268+1920+0  HDMI-1
+    
+    Args:
+        force_refresh: Si True, ignora cache y consulta xrandr inmediatamente
     """
+    now = time.time()
+    
+    # Usar cache si es reciente y no se fuerza refresh
+    if not force_refresh and (now - _MONITOR_CACHE["timestamp"]) < _MONITOR_CACHE["min_interval"]:
+        return _MONITOR_CACHE["data"]
+    
     if not shutil.which("xrandr"):
         return []
     try:
         out = subprocess.check_output(["xrandr", "--listmonitors"], text=True, stderr=subprocess.STDOUT)
     except Exception:
-        return []
+        # Retornar cache en caso de error
+        return _MONITOR_CACHE["data"]
 
     monitors: list[dict] = []
     geom_re = re.compile(r"(?P<w>\d+)/(?:\d+)x(?P<h>\d+)/(?:\d+)\+(?P<x>-?\d+)\+(?P<y>-?\d+)")
@@ -260,6 +281,10 @@ def _xrandr_monitors() -> list[dict]:
                 "h": int(m.group("h")),
             }
         )
+    
+    # Actualizar cache
+    _MONITOR_CACHE["data"] = monitors
+    _MONITOR_CACHE["timestamp"] = now
     return monitors
 
 
@@ -269,7 +294,7 @@ def _current_monitor_inventory() -> list[dict]:
 
     Cada elemento: {name, index, x, y, w, h}
     """
-    xmon = _xrandr_monitors()
+    xmon = _xrandr_monitors(force_refresh=False)  # Usar cache
     if len(xmon) > 0:
         inv = []
         for i, m in enumerate(xmon):
@@ -303,6 +328,52 @@ def _log(msg: str):
     except Exception:
         pass
 
+class X11WindowDetector:
+    """Detecta ventanas maximizadas sin subprocess usando python-xlib directamente."""
+    def __init__(self):
+        if not XLIB_AVAILABLE:
+            self.display = None
+            return
+        try:
+            self.display = xlib_display.Display()
+            self.root = self.display.screen().root
+            self._net_active = self.display.intern_atom('_NET_ACTIVE_WINDOW')
+            self._net_wm_state = self.display.intern_atom('_NET_WM_STATE')
+            self._maximized_vert = self.display.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
+            self._maximized_horz = self.display.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
+        except Exception as e:
+            _log(f"Error inicializando X11WindowDetector: {e}")
+            self.display = None
+    
+    def is_any_window_maximized(self) -> bool:
+        """Retorna True si la ventana activa está maximizada."""
+        if self.display is None:
+            return False
+        
+        try:
+            active = self.root.get_full_property(
+                self._net_active, X.AnyPropertyType
+            )
+            if not active or not active.value:
+                return False
+            
+            win_id = active.value[0]
+            if win_id == 0:
+                return False
+            
+            window = self.display.create_resource_object('window', win_id)
+            state = window.get_full_property(
+                self._net_wm_state, X.AnyPropertyType
+            )
+            
+            if not state:
+                return False
+            
+            states = state.value
+            return (self._maximized_vert in states and 
+                    self._maximized_horz in states)
+        except (XError, Exception):
+            return False
 
 def ensure_wayland():
     session = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
@@ -400,6 +471,26 @@ def _gsettings_set_schema(schema: str, key: str, value: str) -> bool:
 def _gsettings_set(key: str, value: str) -> bool:
     return _gsettings_set_schema("org.gnome.desktop.background", key, _gsettings_quote(value))
 
+def _cleanup_old_snapshots(directory: Path, max_age_seconds: int = 300):
+    """Borra snapshots más viejos de N segundos para evitar acumulación en /dev/shm."""
+    try:
+        if not directory.exists():
+            return
+        
+        now = time.time()
+        count = 0
+        for file in directory.glob(f"{GNOME_WALLPAPER_BASENAME}-*.jpg"):
+            try:
+                if (now - file.stat().st_mtime) > max_age_seconds:
+                    file.unlink()
+                    count += 1
+            except Exception:
+                pass
+        
+        if count > 0:
+            _log(f"Cleanup: eliminados {count} snapshots viejos de {directory}")
+    except Exception as e:
+        _log(f"Error en cleanup de snapshots: {e}")
 
 class BackgroundPlayer(QWidget):
     def __init__(
@@ -423,6 +514,18 @@ class BackgroundPlayer(QWidget):
         self._xprop_failed_count = 0
         self.screen_name = None
         self.is_suspended = False
+
+        # Detector X11 eficiente (sin subprocess)
+        if XLIB_AVAILABLE:
+            try:
+                self._x11_detector = X11WindowDetector()
+                # Verificar que funcionó
+                if self._x11_detector.display is None:
+                    self._x11_detector = None
+            except Exception:
+                self._x11_detector = None
+        else:
+            self._x11_detector = None
 
         self._vlc_media: vlc.Media | None = None
         self._vlc_events_attached = False
@@ -472,7 +575,7 @@ class BackgroundPlayer(QWidget):
             "--video-title-timeout=0",
             "--no-osd",
             "--no-snapshot-preview",
-            "--loop",
+            # Loop se maneja con input-repeat=-1 en el media, no aquí
             "--video-on-top",
             "--quiet",
             "--file-caching=300",
@@ -555,7 +658,16 @@ class BackgroundPlayer(QWidget):
             em = self._vlc_player.event_manager()
 
             def _on_end(event):
-                QTimer.singleShot(0, lambda: self._restart_vlc_playback("end-reached"))
+                # Con input-repeat=-1 el loop es automático, pero si VLC emite EndReached
+                # verificamos si realmente terminó o es transición de loop
+                def _check_and_restart():
+                    if self._vlc_player is None:
+                        return
+                    st = self._vlc_player.get_state()
+                    # Solo reiniciar si realmente está en estado Ended/Stopped
+                    if str(st).lower().endswith(("ended", "stopped")):
+                        self._restart_vlc_playback("end-reached")
+                QTimer.singleShot(200, _check_and_restart)
 
             def _on_error(event):
                 QTimer.singleShot(0, lambda: self._restart_vlc_playback("error"))
@@ -578,7 +690,8 @@ class BackgroundPlayer(QWidget):
         if self._vlc_instance is None or self._vlc_player is None:
             return
         media = self._vlc_instance.media_new(self.video_path)
-        # No confiar en input-repeat; libVLC puede marcar Ended prematuramente en algunas versiones.
+        # input-repeat=-1 hace loop infinito a nivel de media (más confiable que --loop en instancia)
+        media.add_option("input-repeat=-1")
         media.add_option("no-video-title-show")
         media.add_option("file-caching=300")
         self._vlc_player.set_media(media)
@@ -638,22 +751,53 @@ class BackgroundPlayer(QWidget):
             self._vlc_restart_in_progress = False
             return
 
-        delay_ms = int(self._vlc_restart_backoff_ms)
-        self._vlc_restart_backoff_ms = min(8000, max(500, self._vlc_restart_backoff_ms * 2))
+        # Para loops normales (ended), usar un delay mínimo para transición suave
+        is_loop_restart = "ended" in reason.lower() or "end-reached" in reason.lower()
+        delay_ms = 100 if is_loop_restart else int(self._vlc_restart_backoff_ms)
+        
+        if not is_loop_restart:
+            self._vlc_restart_backoff_ms = min(8000, max(500, self._vlc_restart_backoff_ms * 2))
 
-        _log(f"VLC: reinicio programado en {delay_ms}ms (reason={reason})")
+        t = int(self._vlc_player.get_time() or 0)
+        length = int(self._vlc_player.get_length() or 0)
+        _log(f"VLC: reinicio programado en {delay_ms}ms (reason={reason} t={t} len={length})")
 
         def _do_restart():
             try:
                 if self._vlc_player is None:
                     return
-                try:
-                    self._vlc_player.stop()
-                except Exception:
-                    pass
-                self._set_vlc_media()
-                rc = self._vlc_player.play()
-                _log(f"VLC play() [restart] -> {rc}")
+                
+                st = self._vlc_player.get_state()
+                state_str = str(st).lower()
+                
+                # Si está en estado Ended o Stopped, hacer restart completo
+                # El rebobinado suave NO funciona en estos estados
+                if state_str.endswith(("ended", "stopped")):
+                    _log(f"VLC estado={st}, haciendo restart completo")
+                    try:
+                        self._vlc_player.stop()
+                    except Exception:
+                        pass
+                    self._set_vlc_media()
+                    rc = self._vlc_player.play()
+                    _log(f"VLC play() [restart completo] -> {rc}")
+                else:
+                    # Para otros estados (Playing, Paused), intentar rebobinar suave
+                    try:
+                        self._vlc_player.set_time(0)
+                        st_after = self._vlc_player.get_state()
+                        if not str(st_after).lower().endswith("playing"):
+                            self._vlc_player.play()
+                        _log(f"VLC rebobinado suave -> state={st_after}")
+                    except Exception as e:
+                        _log(f"VLC rebobinar falló ({e}), haciendo restart completo")
+                        try:
+                            self._vlc_player.stop()
+                        except Exception:
+                            pass
+                        self._set_vlc_media()
+                        rc = self._vlc_player.play()
+                        _log(f"VLC play() [restart] -> {rc}")
             finally:
                 self._vlc_restart_in_progress = False
 
@@ -779,27 +923,62 @@ class BackgroundPlayer(QWidget):
         QTimer.singleShot(500, lambda: _log_playback_state("0.5s"))
         QTimer.singleShot(1500, lambda: _log_playback_state("1.5s"))
 
-        # Watchdog: si VLC cae en Ended (time=0) o error, reiniciar automáticamente.
+        # Watchdog: detecta cuando VLC se congela o termina y lo reinicia automáticamente
         def _watchdog():
             try:
                 if self._vlc_player is None or self.is_suspended:
                     return
+                
                 st = self._vlc_player.get_state()
                 t = int(self._vlc_player.get_time() or 0)
+                length = int(self._vlc_player.get_length() or 0)
+                
+                # Debug: log cada 30 segundos para diagnosticar
+                check_count = getattr(self, "_watchdog_check_count", 0) + 1
+                if check_count >= 30:
+                    _log(f"Watchdog pantalla {self.screen_index}: state={st} time={t}ms len={length}ms")
+                    check_count = 0
+                setattr(self, "_watchdog_check_count", check_count)
+                
+                # Marcar como listo si está reproduciendo
                 if (not self._playback_ready) and (t > 0 or str(st).lower().endswith("playing")):
                     self._mark_playback_ready()
+                
+                # Detectar estado "ended" real - con input-repeat=-1 debería hacer loop
+                # automático, pero si queda en Ended por mucho tiempo, reiniciar
                 if str(st).lower().endswith("ended"):
                     ended_hits = getattr(self, "_watchdog_ended_hits", 0) + 1
                     setattr(self, "_watchdog_ended_hits", ended_hits)
-                    # Reintentar solo si persiste (2 ticks) para evitar falsos positivos.
-                    if ended_hits >= 2:
-                        self._restart_vlc_playback(f"watchdog-ended t={t}")
+                    # Dar más tiempo (3 hits = 3 segundos) porque input-repeat puede tardar
+                    if ended_hits >= 3:
+                        _log(f"Watchdog: VLC ended persistente en pantalla {self.screen_index} (reiniciando)")
+                        self._restart_vlc_playback(f"watchdog-ended t={t} len={length}")
                         setattr(self, "_watchdog_ended_hits", 0)
                 else:
                     setattr(self, "_watchdog_ended_hits", 0)
-            except Exception:
-                pass
+                
+                # Detectar congelamiento: time no avanza cuando debería estar reproduciendo
+                # Ignorar si está cerca del final (loop en progreso)
+                if str(st).lower().endswith("playing") and length > 0:
+                    last_time = getattr(self, "_watchdog_last_time", -1)
+                    near_end = (length > 0 and t > length - 2000)  # Últimos 2 segundos
+                    
+                    if last_time == t and t > 0 and not near_end:
+                        freeze_count = getattr(self, "_watchdog_freeze_count", 0) + 1
+                        if freeze_count > 5:  # 5 segundos congelado (más tolerante)
+                            _log(f"Watchdog: VLC congelado detectado en pantalla {self.screen_index} (time={t} no avanza)")
+                            self._restart_vlc_playback(f"watchdog-frozen t={t}")
+                            setattr(self, "_watchdog_freeze_count", 0)
+                        else:
+                            setattr(self, "_watchdog_freeze_count", freeze_count)
+                    else:
+                        setattr(self, "_watchdog_freeze_count", 0)
+                    setattr(self, "_watchdog_last_time", t)
+                    
+            except Exception as e:
+                _log(f"ERROR en watchdog pantalla {self.screen_index}: {e}")
 
+        # CRÍTICO: Iniciar el timer del watchdog
         if not hasattr(self, "_watchdog_timer"):
             self._watchdog_timer = QTimer(self)
             self._watchdog_timer.timeout.connect(_watchdog)
@@ -814,31 +993,39 @@ class BackgroundPlayer(QWidget):
                 pass
 
     def snapshot_to_file(self, path: Path, width: int, height: int) -> bool:
+        """Toma snapshot usando ffmpeg."""
         if self._vlc_player is None or not os.path.exists(self.video_path):
             return False
+        
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             current_time_ms = self._vlc_player.get_time()
             timestamp = max(0, current_time_ms / 1000.0)
 
-            # Mejoramos la calidad y la visibilidad del blur
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", str(timestamp), 
                 "-i", self.video_path,
                 "-frames:v", "1",
-                "-an", "-sn", # Ignorar audio/subs para mayor velocidad
-                "-vf", f"scale=400:-1,boxblur=5:1", # Blur mucho más fuerte y visible
-                "-q:v", "5", # Calidad alta (esencial para que se vea bien)
+                "-an", "-sn",
+                "-vf", f"scale={width}:{height},boxblur=2:1",
+                "-q:v", "5",
                 "-f", "mjpeg",
                 str(path)
             ]
             
-            # Aumentamos el timeout a 5 para evitar que falle si el disco está ocupado
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            # Ejecutar de forma síncrona (bloqueante pero funcional)
+            subprocess.run(
+                cmd, 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL, 
+                timeout=5
+            )
             
-            return path.exists() 
-        except Exception:
+            return path.exists()
+            
+        except Exception as e:
+            _log(f"Error en snapshot: {e}")
             return False
 
     def _get_video_size(self) -> tuple[int, int]:
@@ -914,7 +1101,7 @@ class BackgroundPlayer(QWidget):
 
     def _check_screen_alive(self):
         screens = QGuiApplication.screens()
-        xmon = _xrandr_monitors()
+        xmon = _xrandr_monitors(force_refresh=False)  # Usar cache
         use_xrandr_layout = len(xmon) > 1 and len(screens) <= 1
 
         if self.screen_name:
@@ -1201,13 +1388,16 @@ class BackgroundPlayer(QWidget):
     def _check_maximized_window(self):
         if not self._playback_ready:
             return
+        
+        # Reducir GC calls: solo cada 20 checks en lugar de 10
         self._check_count = getattr(self, "_check_count", 0) + 1
-        if self._check_count >= 10:
+        if self._check_count >= 20:
             gc.collect()
             self._check_count = 0
 
         is_maximized = False
 
+        # 1. Intentar GNOME Shell DBus primero (más preciso para GNOME)
         try:
             script = (
                 "(function() { "
@@ -1232,24 +1422,48 @@ class BackgroundPlayer(QWidget):
                     val = args[1]
                     if val == "3" or val == '"3"':
                         is_maximized = True
+                        # Si GNOME responde, no necesitamos X11
+                        if is_maximized:
+                            if not self.is_suspended:
+                                self._suspend_video()
+                        else:
+                            if self.is_suspended:
+                                self._resume_video()
+                        return
         except Exception:
             pass
 
-        if not is_maximized:
-            if self._xprop_failed_count > 5:
-                return
-
+        # 2. Fallback: usar python-xlib directo (SIN subprocess)
+        if self._x11_detector is not None:
             try:
-                res = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL, timeout=0.5).decode()
+                is_maximized = self._x11_detector.is_any_window_maximized()
+            except Exception:
+                pass
+        # 3. Último fallback: subprocess (solo si xlib falló)
+        elif self._xprop_failed_count <= 5:
+            try:
+                res = subprocess.check_output(
+                    ["xprop", "-root", "_NET_ACTIVE_WINDOW"], 
+                    stderr=subprocess.DEVNULL, 
+                    timeout=0.5
+                ).decode()
                 if "window id #" in res:
                     win_id_str = res.split("window id #")[1].strip()
                     if win_id_str != "0x0":
-                        res_state = subprocess.check_output(["xprop", "-id", win_id_str, "_NET_WM_STATE"], stderr=subprocess.DEVNULL, timeout=0.5).decode()
-                        is_maximized = "_NET_WM_STATE_MAXIMIZED_VERT" in res_state and "_NET_WM_STATE_MAXIMIZED_HORZ" in res_state
+                        res_state = subprocess.check_output(
+                            ["xprop", "-id", win_id_str, "_NET_WM_STATE"], 
+                            stderr=subprocess.DEVNULL, 
+                            timeout=0.5
+                        ).decode()
+                        is_maximized = (
+                            "_NET_WM_STATE_MAXIMIZED_VERT" in res_state and 
+                            "_NET_WM_STATE_MAXIMIZED_HORZ" in res_state
+                        )
                         self._xprop_failed_count = 0
             except Exception:
                 self._xprop_failed_count += 1
 
+        # Aplicar pausa/resume
         if is_maximized:
             if not self.is_suspended:
                 self._suspend_video()
@@ -1374,6 +1588,10 @@ class WallpaperService(QApplication):
             _log(f"Evento global: Pantalla conectada: {screen.name()}")
         except Exception:
             _log("Evento global: Pantalla conectada")
+        
+        # Forzar refresh de cache de monitores
+        _xrandr_monitors(force_refresh=True)
+        
         QTimer.singleShot(250, self._autoload_from_config)
 
     def _start_gnome_wallpaper_sync(self):
@@ -1517,6 +1735,13 @@ class WallpaperService(QApplication):
         self._gnome_wallpaper_last_uri = uri
         _log(f"GNOME wallpaper sync: actualizado -> {uri}")
 
+        # Cleanup periódico cada 10 snapshots
+        cleanup_counter = getattr(self, "_cleanup_counter", 0) + 1
+        if cleanup_counter >= 10:
+            _cleanup_old_snapshots(GNOME_WALLPAPER_DIR, max_age_seconds=300)
+            cleanup_counter = 0
+        setattr(self, "_cleanup_counter", cleanup_counter)
+
         try:
             if self._gnome_wallpaper_current_path and self._gnome_wallpaper_current_path.exists():
                 self._gnome_wallpaper_current_path.unlink()
@@ -1531,6 +1756,10 @@ class WallpaperService(QApplication):
 
     def _on_screen_removed(self, screen):
         _log(f"Evento global: Pantalla desconectada: {screen.name()}")
+        
+        # Forzar refresh de cache de monitores
+        _xrandr_monitors(force_refresh=True)
+        
         to_remove = []
         for idx, player in self.players.items():
             if player.screen_name == screen.name():
