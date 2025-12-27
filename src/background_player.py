@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer, QEvent, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtDBus import QDBusConnection, QDBusMessage
+from PySide6.QtDBus import QDBusInterface
 
 import os
 import sys
@@ -30,7 +31,12 @@ try:
 except ImportError:
     XLIB_AVAILABLE = False
 _GSETTINGS_KEYS_CACHE: dict[str, set[str]] = {}
-
+try:
+    from gi.repository import Gio
+    GIO_AVAILABLE = True
+except ImportError:
+    GIO_AVAILABLE = False
+    # Tip: En Ubuntu/Debian se instala con: sudo apt install python3-gi
 
 def _gsettings_list_keys(schema: str) -> set[str] | None:
     try:
@@ -41,6 +47,12 @@ def _gsettings_list_keys(schema: str) -> set[str] | None:
 
 
 def _gsettings_has_key(schema: str, key: str) -> bool:
+    if GIO_AVAILABLE:
+        source = Gio.SettingsSchemaSource.get_default()
+        schema_obj = source.lookup(schema, True)
+        return schema_obj.has_key(key) if schema_obj else False
+    
+    # Tu fallback antiguo por si falla Gio
     cached = _GSETTINGS_KEYS_CACHE.get(schema)
     if cached is None:
         keys = _gsettings_list_keys(schema)
@@ -387,18 +399,19 @@ def is_gnome() -> bool:
 
 
 def _gsettings_get(key: str) -> str | None:
-    if not _gsettings_has_key("org.gnome.desktop.background", key):
-        return None
+    schema = "org.gnome.desktop.background"
+    if GIO_AVAILABLE:
+        try:
+            settings = Gio.Settings.new(schema)
+            return settings.get_value(key).print_(True)
+        except: return None
+    
+    # Fallback antiguo
+    if not _gsettings_has_key(schema, key): return None
     try:
-        out = subprocess.check_output(
-            ["gsettings", "get", "org.gnome.desktop.background", key],
-            text=True,
-            stderr=subprocess.STDOUT,
-        )
-        return out.strip()
-    except Exception as e:
-        _log(f"ERROR gsettings get {key}: {e}")
-        return None
+        out = subprocess.check_output(["gsettings", "get", schema, key], text=True).strip()
+        return out
+    except: return None
 
 
 def _gsettings_quote(value: str) -> str:
@@ -415,57 +428,22 @@ def _gsettings_quote(value: str) -> str:
 
 
 def _gsettings_set_schema(schema: str, key: str, value: str) -> bool:
-    """Setea un key en un schema GNOME usando `gsettings set`.
+    # Si Gio está disponible, es instantáneo
+    if GIO_AVAILABLE:
+        try:
+            settings = Gio.Settings.new(schema)
+            # Quitamos las comillas que vienen del script para que Gio lo procese bien
+            clean_value = value.strip("'").strip('"')
+            return settings.set_string(key, clean_value)
+        except Exception as e:
+            _log(f"Error Gio: {e}")
+            # Si falla Gio, no hacemos return para que intente el fallback de abajo
 
-    `value` debe ser un literal GVariant válido (para strings, típicamente con comillas)."""
-    def _dconf_path_for_schema(s: str) -> str | None:
-        if s == "org.gnome.desktop.background":
-            return "/org/gnome/desktop/background/"
-        if s == "org.gnome.desktop.screensaver":
-            return "/org/gnome/desktop/screensaver/"
-        return None
-
-    if not _gsettings_has_key(schema, key):
-        return False
-
+    # Fallback con subprocess (tu código original)
     try:
-        res = subprocess.run(
-            ["gsettings", "set", schema, key, value],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if res.returncode == 0:
-            return True
-
-        err = (res.stderr or "").strip()
-        _log(f"ERROR gsettings set {schema} {key}: {err or 'returncode ' + str(res.returncode)}")
-
-        # Fallback: dconf write (a veces funciona mejor en ciertos entornos)
-        base = _dconf_path_for_schema(schema)
-        if base and shutil.which("dconf"):
-            dconf_key = base + key.replace("-", "-")
-            try:
-                res2 = subprocess.run(
-                    ["dconf", "write", dconf_key, value],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                if res2.returncode == 0:
-                    _log(f"dconf write OK: {dconf_key}")
-                    return True
-                err2 = (res2.stderr or "").strip()
-                _log(f"ERROR dconf write {dconf_key}: {err2 or 'returncode ' + str(res2.returncode)}")
-            except Exception as e:
-                _log(f"ERROR dconf write {dconf_key}: {e}")
-
-        return False
-    except Exception as e:
-        _log(f"ERROR gsettings set {schema} {key}: {e}")
-        return False
+        res = subprocess.run(["gsettings", "set", schema, key, value], capture_output=True)
+        return res.returncode == 0
+    except: return False
 
 
 def _gsettings_set(key: str, value: str) -> bool:
@@ -514,6 +492,13 @@ class BackgroundPlayer(QWidget):
         self._xprop_failed_count = 0
         self.screen_name = None
         self.is_suspended = False
+
+        self.gnome_interface = QDBusInterface(
+    "org.gnome.Shell",
+    "/org/gnome/Shell",
+    "org.gnome.Shell",
+    QDBusConnection.sessionBus()
+)
 
         # Detector X11 eficiente (sin subprocess)
         if XLIB_AVAILABLE:
@@ -568,9 +553,8 @@ class BackgroundPlayer(QWidget):
     @staticmethod
     def _create_vlc_instance() -> vlc.Instance:
         base_options = [
-            "--avcodec-hw=none",
-            "--no-hw-dec",
-            "--no-vaapi",
+            "--avcodec-hw=any",
+            "--hwdec=auto",
             "--no-video-title-show",
             "--video-title-timeout=0",
             "--no-osd",
@@ -687,15 +671,16 @@ class BackgroundPlayer(QWidget):
             _log(f"ERROR adjuntando eventos VLC: {e}")
 
     def _set_vlc_media(self):
-        if self._vlc_instance is None or self._vlc_player is None:
-            return
+        if self._vlc_instance is None or self._vlc_player is None: return
         media = self._vlc_instance.media_new(self.video_path)
-        # input-repeat=-1 hace loop infinito a nivel de media (más confiable que --loop en instancia)
-        media.add_option("input-repeat=-1")
+        
+        # Agregamos opciones de repetición nativa para evitar el frame estático
+        media.add_option("input-repeat=999999") 
+        media.add_option("loop")
         media.add_option("no-video-title-show")
         media.add_option("file-caching=300")
+        
         self._vlc_player.set_media(media)
-        # Retener referencia: evitar media.release() antes de que MediaPlayer procese el recurso.
         self._vlc_media = media
 
     def _mark_playback_ready(self):
@@ -731,77 +716,30 @@ class BackgroundPlayer(QWidget):
             self.monitor_timer.start(2000)
 
     def _restart_vlc_playback(self, reason: str):
-        if self._vlc_player is None:
-            return
-        if self._vlc_restart_in_progress:
+        if self._vlc_player is None or getattr(self, "_vlc_restart_in_progress", False):
             return
 
         self._vlc_restart_in_progress = True
         self._playback_ready = False
-        self._vlc_restart_count += 1
-
-        if self._vlc_restart_count_reset_timer is None:
-            self._vlc_restart_count_reset_timer = QTimer(self)
-            self._vlc_restart_count_reset_timer.setSingleShot(True)
-            self._vlc_restart_count_reset_timer.timeout.connect(lambda: setattr(self, "_vlc_restart_count", 0))
-        self._vlc_restart_count_reset_timer.start(15000)
-
-        if self._vlc_restart_count > 8:
-            _log(f"ERROR VLC: demasiados reinicios seguidos ({self._vlc_restart_count}) -> no reinicio (reason={reason})")
-            self._vlc_restart_in_progress = False
-            return
-
-        # Para loops normales (ended), usar un delay mínimo para transición suave
-        is_loop_restart = "ended" in reason.lower() or "end-reached" in reason.lower()
-        delay_ms = 100 if is_loop_restart else int(self._vlc_restart_backoff_ms)
-        
-        if not is_loop_restart:
-            self._vlc_restart_backoff_ms = min(8000, max(500, self._vlc_restart_backoff_ms * 2))
-
-        t = int(self._vlc_player.get_time() or 0)
-        length = int(self._vlc_player.get_length() or 0)
-        _log(f"VLC: reinicio programado en {delay_ms}ms (reason={reason} t={t} len={length})")
+        _log(f"VLC: Hard Reset por {reason}")
 
         def _do_restart():
             try:
-                if self._vlc_player is None:
-                    return
+                if self._vlc_player is None: return
+                self._vlc_player.stop()
+                # Pequeño hack: desasociar y volver a asociar el media
+                self._set_vlc_media() 
+                self._vlc_player.play()
                 
-                st = self._vlc_player.get_state()
-                state_str = str(st).lower()
-                
-                # Si está en estado Ended o Stopped, hacer restart completo
-                # El rebobinado suave NO funciona en estos estados
-                if state_str.endswith(("ended", "stopped")):
-                    _log(f"VLC estado={st}, haciendo restart completo")
-                    try:
-                        self._vlc_player.stop()
-                    except Exception:
-                        pass
-                    self._set_vlc_media()
-                    rc = self._vlc_player.play()
-                    _log(f"VLC play() [restart completo] -> {rc}")
-                else:
-                    # Para otros estados (Playing, Paused), intentar rebobinar suave
-                    try:
-                        self._vlc_player.set_time(0)
-                        st_after = self._vlc_player.get_state()
-                        if not str(st_after).lower().endswith("playing"):
-                            self._vlc_player.play()
-                        _log(f"VLC rebobinado suave -> state={st_after}")
-                    except Exception as e:
-                        _log(f"VLC rebobinar falló ({e}), haciendo restart completo")
-                        try:
-                            self._vlc_player.stop()
-                        except Exception:
-                            pass
-                        self._set_vlc_media()
-                        rc = self._vlc_player.play()
-                        _log(f"VLC play() [restart] -> {rc}")
+                # Si el sistema estaba pausado antes del crash, 
+                # lo mantenemos pausado pero en el frame 0.
+                if self.is_suspended:
+                    QTimer.singleShot(100, lambda: self._vlc_player.set_pause(1))
+                    
             finally:
                 self._vlc_restart_in_progress = False
 
-        QTimer.singleShot(delay_ms, _do_restart)
+        QTimer.singleShot(300, _do_restart)
 
     def _start_vlc(self):
         if not os.path.exists(self.video_path):
@@ -924,73 +862,43 @@ class BackgroundPlayer(QWidget):
         QTimer.singleShot(1500, lambda: _log_playback_state("1.5s"))
 
         # Watchdog: detecta cuando VLC se congela o termina y lo reinicia automáticamente
-        def _watchdog():
-            try:
-                if self._vlc_player is None or self.is_suspended:
-                    return
-                
-                st = self._vlc_player.get_state()
-                t = int(self._vlc_player.get_time() or 0)
-                length = int(self._vlc_player.get_length() or 0)
-                
-                # Debug: log cada 30 segundos para diagnosticar
-                check_count = getattr(self, "_watchdog_check_count", 0) + 1
-                if check_count >= 30:
-                    _log(f"Watchdog pantalla {self.screen_index}: state={st} time={t}ms len={length}ms")
-                    check_count = 0
-                setattr(self, "_watchdog_check_count", check_count)
-                
-                # Marcar como listo si está reproduciendo
-                if (not self._playback_ready) and (t > 0 or str(st).lower().endswith("playing")):
-                    self._mark_playback_ready()
-                
-                # Detectar estado "ended" real - con input-repeat=-1 debería hacer loop
-                # automático, pero si queda en Ended por mucho tiempo, reiniciar
-                if str(st).lower().endswith("ended"):
-                    ended_hits = getattr(self, "_watchdog_ended_hits", 0) + 1
-                    setattr(self, "_watchdog_ended_hits", ended_hits)
-                    # Dar más tiempo (3 hits = 3 segundos) porque input-repeat puede tardar
-                    if ended_hits >= 3:
-                        _log(f"Watchdog: VLC ended persistente en pantalla {self.screen_index} (reiniciando)")
-                        self._restart_vlc_playback(f"watchdog-ended t={t} len={length}")
-                        setattr(self, "_watchdog_ended_hits", 0)
-                else:
-                    setattr(self, "_watchdog_ended_hits", 0)
-                
-                # Detectar congelamiento: time no avanza cuando debería estar reproduciendo
-                # Ignorar si está cerca del final (loop en progreso)
-                if str(st).lower().endswith("playing") and length > 0:
-                    last_time = getattr(self, "_watchdog_last_time", -1)
-                    near_end = (length > 0 and t > length - 2000)  # Últimos 2 segundos
-                    
-                    if last_time == t and t > 0 and not near_end:
-                        freeze_count = getattr(self, "_watchdog_freeze_count", 0) + 1
-                        if freeze_count > 5:  # 5 segundos congelado (más tolerante)
-                            _log(f"Watchdog: VLC congelado detectado en pantalla {self.screen_index} (time={t} no avanza)")
-                            self._restart_vlc_playback(f"watchdog-frozen t={t}")
-                            setattr(self, "_watchdog_freeze_count", 0)
-                        else:
-                            setattr(self, "_watchdog_freeze_count", freeze_count)
-                    else:
-                        setattr(self, "_watchdog_freeze_count", 0)
-                    setattr(self, "_watchdog_last_time", t)
-                    
-            except Exception as e:
-                _log(f"ERROR en watchdog pantalla {self.screen_index}: {e}")
+    def _watchdog(self):
+        try:
+            if self._vlc_player is None: return
+            
+            st = self._vlc_player.get_state()
+            t = int(self._vlc_player.get_time() or 0)
+            length = int(self._vlc_player.get_length() or 0)
 
-        # CRÍTICO: Iniciar el timer del watchdog
-        if not hasattr(self, "_watchdog_timer"):
-            self._watchdog_timer = QTimer(self)
-            self._watchdog_timer.timeout.connect(_watchdog)
-            self._watchdog_timer.start(1000)
+            # 1. SI EL VIDEO TERMINÓ (Estado Ended), REINICIAR SIEMPRE
+            # No importa si está suspendido o no, si terminó, hay que revivirlo.
+            if str(st).lower().endswith(("ended", "stopped")):
+                _log(f"Watchdog: Estado {st} detectado. Reviviendo video.")
+                self._restart_vlc_playback("state-ended-recovery")
+                return
 
-        self._schedule_crop(reset=True)
+            # Si está suspendido y no ha terminado, aquí sí salimos para no gastar CPU
+            if self.is_suspended: return
+            
+            # 2. DETECTAR FIN DE VIDEO POR TIEMPO (21500/21466ms)
+            if length > 0 and t >= (length - 150):
+                _log(f"Watchdog: Fin de tiempo detectado ({t}/{length}ms). Reiniciando...")
+                self._restart_vlc_playback("time-limit-reached")
+                return
 
-        if self._start_position is not None:
-            try:
-                QTimer.singleShot(300, lambda: self._vlc_player and self._vlc_player.set_position(self._start_position))
-            except Exception:
-                pass
+            # 3. DETECTAR RELOJ CONGELADO EN 0ms
+            if str(st).lower().endswith("playing") and t == 0:
+                clock_zero = getattr(self, "_watchdog_stuck_zero", 0) + 1
+                setattr(self, "_watchdog_stuck_zero", clock_zero)
+                if clock_zero > 3: 
+                    _log("Watchdog: Reloj clavado en 0ms. Hard Reset.")
+                    self._restart_vlc_playback("stuck-at-zero")
+                    setattr(self, "_watchdog_stuck_zero", 0)
+            else:
+                setattr(self, "_watchdog_stuck_zero", 0)
+                
+        except Exception as e:
+            _log(f"ERROR en watchdog: {e}")
 
     def snapshot_to_file(self, path: Path, width: int, height: int) -> bool:
         """Toma snapshot usando ffmpeg."""
@@ -1008,12 +916,13 @@ class BackgroundPlayer(QWidget):
                 "-i", self.video_path,
                 "-frames:v", "1",
                 "-an", "-sn",
-                "-vf", f"scale={width}:{height},boxblur=2:1",
-                "-q:v", "5",
+                # Filtro mejorado: Escala -> Desenfoque Gaussiano -> Más color
+                "-vf", f"scale={width}:{height},gblur=sigma=5:steps=3,eq=saturation=1.1",
+                "-q:v", "2", # Mejoramos la calidad de la imagen de 5 a 2
                 "-f", "mjpeg",
                 str(path)
             ]
-            
+
             # Ejecutar de forma síncrona (bloqueante pero funcional)
             subprocess.run(
                 cmd, 
@@ -1027,7 +936,7 @@ class BackgroundPlayer(QWidget):
         except Exception as e:
             _log(f"Error en snapshot: {e}")
             return False
-
+     
     def _get_video_size(self) -> tuple[int, int]:
         if self._vlc_player is None:
             return (0, 0)
@@ -1389,87 +1298,51 @@ class BackgroundPlayer(QWidget):
         if not self._playback_ready:
             return
         
-        # Reducir GC calls: solo cada 20 checks en lugar de 10
+        # Limpieza de memoria periódica
         self._check_count = getattr(self, "_check_count", 0) + 1
         if self._check_count >= 20:
-            gc.collect()
             self._check_count = 0
 
         is_maximized = False
+        method_ok = False
 
-        # 1. Intentar GNOME Shell DBus primero (más preciso para GNOME)
+        # 1. Método GNOME Shell (DBus)
         try:
-            script = (
-                "(function() { "
-                "let w = global.display.focus_window; "
-                "if (!w) return 0; "
-                f"if (w.get_monitor() !== {int(self.screen_index)}) return 0; "
-                "return w.get_maximized(); "
-                "})()"
-            )
-            msg = QDBusMessage.createMethodCall(
-                "org.gnome.Shell",
-                "/org/gnome/Shell",
-                "org.gnome.Shell",
-                "Eval",
-            )
-            msg.setArguments([script])
-            reply = QDBusConnection.sessionBus().call(msg)
-
+            script = f"global.display.focus_window && global.display.focus_window.get_monitor() === {self.screen_index} ? global.display.focus_window.get_maximized() : 0"
+            reply = self.gnome_interface.call("Eval", script)
+            
             if reply.type() == QDBusMessage.MessageType.ReplyMessage:
-                args = reply.arguments()
-                if len(args) >= 2 and args[0] is True:
-                    val = args[1]
-                    if val == "3" or val == '"3"':
-                        is_maximized = True
-                        # Si GNOME responde, no necesitamos X11
-                        if is_maximized:
-                            if not self.is_suspended:
-                                self._suspend_video()
-                        else:
-                            if self.is_suspended:
-                                self._resume_video()
-                        return
-        except Exception:
-            pass
+                val = str(reply.arguments()[1]).strip('"')
+                is_maximized = (val == "3")
+                method_ok = True
+        except:
+            method_ok = False
 
-        # 2. Fallback: usar python-xlib directo (SIN subprocess)
-        if self._x11_detector is not None:
-            try:
-                is_maximized = self._x11_detector.is_any_window_maximized()
-            except Exception:
-                pass
-        # 3. Último fallback: subprocess (solo si xlib falló)
-        elif self._xprop_failed_count <= 5:
-            try:
-                res = subprocess.check_output(
-                    ["xprop", "-root", "_NET_ACTIVE_WINDOW"], 
-                    stderr=subprocess.DEVNULL, 
-                    timeout=0.5
-                ).decode()
-                if "window id #" in res:
-                    win_id_str = res.split("window id #")[1].strip()
-                    if win_id_str != "0x0":
-                        res_state = subprocess.check_output(
-                            ["xprop", "-id", win_id_str, "_NET_WM_STATE"], 
-                            stderr=subprocess.DEVNULL, 
-                            timeout=0.5
-                        ).decode()
-                        is_maximized = (
-                            "_NET_WM_STATE_MAXIMIZED_VERT" in res_state and 
-                            "_NET_WM_STATE_MAXIMIZED_HORZ" in res_state
-                        )
-                        self._xprop_failed_count = 0
-            except Exception:
-                self._xprop_failed_count += 1
+        # 2. Fallbacks (X11 / xprop) si el anterior falla
+        if not method_ok:
+            if self._x11_detector is not None:
+                try:
+                    is_maximized = self._x11_detector.is_any_window_maximized()
+                    method_ok = True
+                except: pass
+            
+            if not method_ok and self._xprop_failed_count <= 5:
+                try:
+                    res = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL, timeout=0.4).decode()
+                    if "window id #" in res:
+                        wid = res.split("#")[1].split(",")[0].strip()
+                        if wid != "0x0":
+                            state = subprocess.check_output(["xprop", "-id", wid, "_NET_WM_STATE"], stderr=subprocess.DEVNULL, timeout=0.4).decode()
+                            is_maximized = "_NET_WM_STATE_MAXIMIZED_VERT" in state and "_NET_WM_STATE_MAXIMIZED_HORZ" in state
+                    self._xprop_failed_count = 0
+                except: 
+                    self._xprop_failed_count += 1
 
-        # Aplicar pausa/resume
-        if is_maximized:
-            if not self.is_suspended:
-                self._suspend_video()
-        else:
-            if self.is_suspended:
-                self._resume_video()
+        # 3. Aplicar estado final
+        if is_maximized and not self.is_suspended:
+            self._suspend_video()
+        elif not is_maximized and self.is_suspended:
+            self._resume_video()
 
 
 class WallpaperService(QApplication):
@@ -1716,7 +1589,7 @@ class WallpaperService(QApplication):
         if _gsettings_has_key("org.gnome.desktop.background", "picture-uri-dark"):
             ok_bg_dark = _gsettings_set("picture-uri-dark", uri)
 
-        ok_ss = _gsettings_set_schema("org.gnome.desktop.screensaver", "picture-uri", _gsettings_quote(uri))
+        ok_ss = _gsettings_set_schema("org.gnome.desktop.screensaver", "picture-uri", uri)
         ok_ss_dark = False
         if _gsettings_has_key("org.gnome.desktop.screensaver", "picture-uri-dark"):
             ok_ss_dark = _gsettings_set_schema("org.gnome.desktop.screensaver", "picture-uri-dark", _gsettings_quote(uri))
