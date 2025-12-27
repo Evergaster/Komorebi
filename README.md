@@ -40,62 +40,50 @@ El nombre *Komorebi* (木漏れ日) es una palabra japonesa que describe la luz 
 
 ## 📦 Instalación
 
+La forma más sencilla de instalar Komorebi es utilizando el script de instalación automatizado incluido.
+
 1.  **Clonar el repositorio**:
     ```bash
     git clone https://github.com/evergaster/komorebi.git
     cd komorebi
     ```
 
-2.  **Crear un entorno virtual (Recomendado)**:
+2.  **Ejecutar el instalador**:
+    ```bash
+    chmod +x install.sh
+    ./install.sh
+    ```
+    
+    El script te guiará a través de un menú simple donde podrás elegir instalar o desinstalar la aplicación. Se encargará automáticamente de:
+    *   Instalar dependencias del sistema (VLC, Python, etc.) para **Arch, Fedora, Debian y Ubuntu**.
+    *   Crear un entorno virtual de Python aislado.
+    *   Instalar las librerías necesarias.
+    *   Crear el acceso directo en el menú de aplicaciones ("Komorebi Wallpaper").
+
+### Instalación Manual
+
+Si prefieres instalarlo manualmente o usas una distribución no soportada por el script:
+
+1.  **Instalar dependencias del sistema**:
+    *   **Debian/Ubuntu**: `sudo apt install python3 python3-pip python3-venv vlc ffmpeg`
+    *   **Fedora**: `sudo dnf install python3 python3-pip vlc ffmpeg`
+    *   **Arch**: `sudo pacman -S python python-pip vlc ffmpeg`
+
+2.  **Configurar entorno Python**:
     ```bash
     python3 -m venv .venv
     source .venv/bin/activate
+    pip install -r requirements.txt
     ```
 
-3.  **Instalar dependencias de Python**:
+3.  **Ejecutar**:
     ```bash
-    pip install PySide6 python-vlc psutil
+    python3 main.py
     ```
-
-4.  **Instalar dependencias del sistema (Debian/Ubuntu)**:
-    ```bash
-        sudo apt install ffmpeg vlc x11-utils x11-xserver-utils \
-            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxrender1
-    ```
-
-> Nota: el paquete `.deb` declara dependencias adicionales típicas de Qt (`xcb`, OpenGL, DBus) y recomienda plugins de VLC; si instalas desde fuentes, podrías necesitarlas según tu distro.
-
-## 🧱 Construcción del paquete .deb
-
-Este repositorio incluye un script que genera un binario con PyInstaller y lo empaqueta como `.deb`.
-
-1. **Dependencias de build (Debian/Ubuntu)**:
-    ```bash
-    sudo apt install dpkg-dev fakeroot ffmpeg
-    ```
-    - `ImageMagick` es opcional (si no está, se usa `ffmpeg` para generar el icono PNG).
-
-2. **Dependencias Python de build**:
-    ```bash
-    pip install pyinstaller
-    ```
-
-3. **Construir**:
-    ```bash
-    ./build_deb.sh
-    ```
-
-El resultado será un archivo del estilo: `komorebi_1.1.0_<arquitectura>.deb`.
-
-### Si al instalar el .deb no abre
-
-- Ejecuta desde terminal `/usr/bin/komorebi` para ver errores.
-- Si falla al arrancar, revisa el log: `/tmp/komorebi_startup_error.log`.
 
 ## 🎮 Uso
 
-Para iniciar la aplicación:
+Para iniciar la aplicación, simplemente busca **"Komorebi"** en tu menú de aplicaciones (si usaste el instalador) o ejecuta `python3 main.py` desde la terminal.
 
 ```bash
 python main.py
