@@ -35,7 +35,7 @@ El nombre *Komorebi* (木漏れ日) es una palabra japonesa que describe la luz 
 
 *   **Sistema Operativo**: Linux.
 *   **Sesión Gráfica**: Wayland (Probado y optimizado para GNOME Shell).
-*   **Python**: 3.10 o superior.
+*   **Python**: 3.13 o superior (ver `requires-python` en `pyproject.toml`).
 *   **Dependencias del Sistema**:
     *   `ffmpeg` (miniaturas / thumbnails).
     *   `vlc` (reproducción en el servicio de fondo vía libVLC).
@@ -44,7 +44,7 @@ El nombre *Komorebi* (木漏れ日) es una palabra japonesa que describe la luz 
 
 ## 📦 Instalación
 
-La forma más sencilla de instalar Komorebi es utilizando el script de instalación automatizado incluido.
+La forma más sencilla de instalar Komorebi es utilizando el instalador incluido.
 
 1.  **Clonar el repositorio**:
     ```bash
@@ -60,8 +60,8 @@ La forma más sencilla de instalar Komorebi es utilizando el script de instalaci
     
     El script te guiará a través de un menú simple donde podrás elegir instalar o desinstalar la aplicación. Se encargará automáticamente de:
     *   Instalar dependencias del sistema (VLC, Python, etc.) para **Arch, Fedora, Debian y Ubuntu**.
-    *   Crear un entorno virtual de Python aislado.
-    *   Instalar las librerías necesarias.
+    *   Crear un entorno virtual de Python aislado en `~/.local/share/komorebi/.venv`.
+    *   Instalar dependencias Python desde `pyproject.toml` (y algunas librerías extra necesarias para runtime).
     *   Crear el acceso directo en el menú de aplicaciones ("Komorebi Wallpaper").
 
 ### Instalación Manual
@@ -77,7 +77,10 @@ Si prefieres instalarlo manualmente o usas una distribución no soportada por el
     ```bash
     python3 -m venv .venv
     source .venv/bin/activate
-    pip install -r requirements.txt
+    pip install --upgrade pip wheel
+    pip install -e . setproctitle
+    # Recomendado (mejor integración X11/XWayland):
+    pip install python-xlib
     ```
 
 3.  **Ejecutar**:
@@ -85,12 +88,23 @@ Si prefieres instalarlo manualmente o usas una distribución no soportada por el
     python3 main.py
     ```
 
+    Si estás en Wayland y no ves el fondo, prueba forzar XWayland para la ventana de fondo:
+    ```bash
+    QT_QPA_PLATFORM=xcb python3 main.py
+    ```
+
 ## 🎮 Uso
 
-Para iniciar la aplicación, simplemente busca **"Komorebi"** en tu menú de aplicaciones (si usaste el instalador) o ejecuta `python3 main.py` desde la terminal.
+Para iniciar la aplicación, simplemente busca **"Komorebi"** en tu menú de aplicaciones (si usaste el instalador) o ejecútalo desde la terminal.
 
 ```bash
-python main.py
+python3 main.py
+```
+
+Tip: también puedes usar el wrapper [run_komorebi.sh](run_komorebi.sh) (exporta `QT_QPA_PLATFORM=xcb` automáticamente):
+
+```bash
+./run_komorebi.sh
 ```
 
 1.  **Añadir Fondos**:
