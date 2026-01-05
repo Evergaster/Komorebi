@@ -16,6 +16,58 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from src.engine import WallpaperEngine
 
+
+def _get_xdg_videos_dir() -> str:
+    """Devuelve el directorio de vídeos del usuario según XDG/GNOME.
+
+    - Preferido: `xdg-user-dir VIDEOS`
+    - Alternativa: ~/.config/user-dirs.dirs (XDG_VIDEOS_DIR)
+    - Fallback: carpeta existente (~/Vídeos o ~/Videos) o ~/Videos
+    """
+
+    try:
+        p = subprocess.run(
+            ["xdg-user-dir", "VIDEOS"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        out = (p.stdout or "").strip()
+        if p.returncode == 0 and out:
+            return os.path.expanduser(out)
+    except Exception:
+        pass
+
+
+    try:
+        cfg = os.path.expanduser("~/.config/user-dirs.dirs")
+        if os.path.exists(cfg):
+            with open(cfg, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("XDG_VIDEOS_DIR="):
+                        val = line.split("=", 1)[1].strip().strip('"')
+                        val = val.replace("$HOME", os.path.expanduser("~"))
+                        if val:
+                            return os.path.expanduser(val)
+    except Exception:
+        pass
+
+
+    home = Path.home()
+    candidates = [home / "Vídeos", home / "Videos"]
+    for c in candidates:
+        try:
+            if c.exists() and c.is_dir():
+                return str(c)
+        except Exception:
+            pass
+
+    return str(home / "Videos")
+
 THEMES = {
     "dark": {
         "window": "#1e1e1e",
@@ -268,7 +320,7 @@ class MainWindow(QMainWindow):
             )
             sys.exit(1)
         
-        self.video_dir = os.path.expanduser("~/Videos/Komorebi")
+        self.video_dir = os.path.join(_get_xdg_videos_dir(), "Komorebi")
         os.makedirs(self.video_dir, exist_ok=True)
 
         self._meta_cache_path = os.path.join(os.path.expanduser("~/.cache/komorebi"), "video_meta.json")
