@@ -1,6 +1,6 @@
 """
 Engine de Wallpaper - Versión simplificada estilo Hidamari
-Wayland solamente: GNOME + Qt Wayland. Lanza un proceso de fondo sin barra ni icono.
+Soporta Wayland y X11. Lanza un proceso de fondo sin barra ni icono.
 """
 import os
 import sys
@@ -30,11 +30,10 @@ class WallpaperEngine:
 
         self.session = os.environ.get('XDG_SESSION_TYPE', 'x11').lower()
         self.is_gnome = 'GNOME' in os.environ.get('XDG_CURRENT_DESKTOP', '').upper()
-        if self.session != 'wayland':
-            raise RuntimeError("Solo se soporta Wayland en esta versión. Cambia tu sesión a GNOME Wayland.")
         
-        if self.is_gnome:
-            self._log("⚠️  GNOME Wayland - proceso de fondo sin icono")
+        session_type = "Wayland" if self.session == "wayland" else "X11"
+        desktop = "GNOME" if self.is_gnome else os.environ.get('XDG_CURRENT_DESKTOP', 'Desconocido')
+        self._log(f"🖥️ Iniciando en {desktop} ({session_type})")
 
 
     def get_screen_count(self):

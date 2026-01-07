@@ -90,8 +90,13 @@ _VLC_PLUGIN_PATH = _configure_vlc_env()
 
 _MONITOR_CACHE = {"data": [], "timestamp": 0, "min_interval": 5.0}
 
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-os.environ.setdefault("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
+# Configurar QT_QPA_PLATFORM según la sesión
+_session_type = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
+if _session_type == "wayland":
+    os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+    os.environ.setdefault("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
+else:
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 LOG_FILE = Path("/dev/shm/komorebi_wall.log")
 SERVER_NAME = "komorebi_wallpaper_service"
@@ -371,11 +376,14 @@ class X11WindowDetector:
         except (XError, Exception):
             return False
 
-def ensure_wayland():
+def check_session_type():
+    """Retorna el tipo de sesión (wayland o x11) y si es GNOME"""
     session = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
-    if session != "wayland":
-        _log("✖ Esta versión solo soporta Wayland")
-        sys.exit(1)
+    is_gnome_env = is_gnome()
+    session_type = "Wayland" if session == "wayland" else "X11"
+    desktop = "GNOME" if is_gnome_env else os.environ.get('XDG_CURRENT_DESKTOP', 'Desconocido')
+    _log(f"🖥️ Sesión detectada: {desktop} ({session_type})")
+    return session, is_gnome_env
 
 
 def is_gnome() -> bool:
@@ -1908,7 +1916,7 @@ def main(argv=None):
     except Exception:
         pass
 
-    ensure_wayland()
+    session, is_gnome_env = check_session_type()
 
     if send_command_to_server(args):
         return 0

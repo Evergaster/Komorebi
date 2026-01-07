@@ -1310,7 +1310,7 @@ class MainWindow(QMainWindow):
         lbl_title.setStyleSheet(f"font-size: 32px; font-weight: bold; color: {self.colors['text']}; margin-bottom: 10px;")
         layout.addWidget(lbl_title)
         
-        lbl_desc = QLabel("Un motor de fondos de pantalla animados para Linux (Wayland).\nCreado con Python y PySide6.")
+        lbl_desc = QLabel("Un motor de fondos de pantalla animados para Linux (Wayland y X11).\nCreado con Python y PySide6.")
         lbl_desc.setStyleSheet(f"font-size: 16px; color: {self.colors['text_secondary']}; margin-bottom: 30px;")
         lbl_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_desc)
