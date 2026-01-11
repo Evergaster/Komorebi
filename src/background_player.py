@@ -32,7 +32,7 @@ except ImportError:
     XLIB_AVAILABLE = False
 _GSETTINGS_KEYS_CACHE: dict[str, set[str]] = {}
 try:
-    from gi.repository import Gio
+    from gi.repository import Gio  # pyright: ignore[reportMissingImports]
     GIO_AVAILABLE = True
 except ImportError:
     GIO_AVAILABLE = False
@@ -92,11 +92,16 @@ _MONITOR_CACHE = {"data": [], "timestamp": 0, "min_interval": 5.0}
 
 # Configurar QT_QPA_PLATFORM según la sesión
 _session_type = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
-if _session_type == "wayland":
-    os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
-    os.environ.setdefault("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
+
+_force_xcb = os.environ.get("KOMOREBI_FORCE_XCB", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+if _session_type == "wayland" and _force_xcb and "QT_QPA_PLATFORM" not in os.environ:
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 else:
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_QPA_PLATFORM", "wayland" if _session_type == "wayland" else "xcb")
+
+if os.environ.get("QT_QPA_PLATFORM", "").lower().startswith("wayland"):
+    os.environ.setdefault("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
 
 LOG_FILE = Path("/dev/shm/komorebi_wall.log")
 SERVER_NAME = "komorebi_wallpaper_service"
@@ -782,6 +787,15 @@ class BackgroundPlayer(QWidget):
 
         self._ensure_vlc_player()
 
+        # Evitar VLC flotante: si no estamos en backend X11 (xcb), no podemos incrustar.
+        try:
+            platform = (QGuiApplication.platformName() or "").lower()
+        except Exception:
+            platform = ""
+        if platform and platform != "xcb":
+            _log(f"VLC: embedding no soportado en Qt platform='{platform}'. Se omite inicio para evitar ventana flotante.")
+            return
+
         if getattr(self, "_vlc_xwindow_set", False) is not True:
             tries = getattr(self, "_start_vlc_xid_tries", 0)
             if tries >= 20:
@@ -794,7 +808,20 @@ class BackgroundPlayer(QWidget):
                     if not self.isVisible() or self._vlc_player is None:
                         QTimer.singleShot(100, self._start_vlc)
                         return
+                    # Esperar a que el servidor gráfico haya creado el XID real.
+                    if self.windowHandle() is not None:
+                        try:
+                            if not self.windowHandle().isExposed():
+                                QTimer.singleShot(50, self._start_vlc)
+                                return
+                        except Exception:
+                            pass
+
                     xid = int(self.winId())
+                    if xid == 0:
+                        QTimer.singleShot(50, self._start_vlc)
+                        return
+
                     self._vlc_player.set_xwindow(xid)
                     setattr(self, "_vlc_xwindow_set", True)
                     _log(f"VLC: set_xwindow OK xid={xid}")
@@ -1105,7 +1132,19 @@ class BackgroundPlayer(QWidget):
             self.lower()
 
     def _setup_window(self):
-        flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus
+
+        try:
+            base_type = Qt.WindowType.Desktop
+        except Exception:
+            base_type = Qt.WindowType.Tool
+
+        flags = base_type | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus
+
+        try:
+            flags |= Qt.WindowType.Tool
+        except Exception:
+            pass
+        
         try:
             flags |= Qt.WindowType.WindowTransparentForInput
         except Exception:
@@ -1120,10 +1159,20 @@ class BackgroundPlayer(QWidget):
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
+
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        except Exception:
+            pass
+
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_X11DoNotAcceptFocus, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeDesktop, True)
+        except Exception:
+            pass
         try:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         except Exception:

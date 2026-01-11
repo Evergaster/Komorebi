@@ -9,9 +9,6 @@ import setproctitle
 from PySide6.QtGui import QIcon
 
 setproctitle.setproctitle("komorebi")
-
-os.environ["QT_MEDIA_BACKEND"] = "gstreamer"  
-
 os.environ.setdefault("QT_DESKTOP_FILE_NAME", "komorebi")
 
 SINGLE_INSTANCE_SERVER_NAME = "komorebi_gui_single_instance"
@@ -76,6 +73,9 @@ if __name__ == "__main__":
         bg_argv = sys.argv[idx + 1 :]
         from src import background_player
         raise SystemExit(background_player.main(bg_argv))
+
+    # Solo aplica a la GUI (QtMultimedia). El proceso de fondo usa libVLC.
+    os.environ["QT_MEDIA_BACKEND"] = "gstreamer"
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--restore-only", action="store_true")
