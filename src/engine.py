@@ -17,6 +17,9 @@ LOG_FILE = Path("/tmp/komorebi_wall.log")
 THUMB_DIR = Path.home() / ".cache" / "komorebi" / "thumbnails"
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 
+MIN_RATE = 0.25
+HARD_MAX_RATE = 2.5
+
 # Debe coincidir con SERVER_NAME en src/background_player.py
 WALLPAPER_SERVER_NAME = "komorebi_wallpaper_service"
 
@@ -176,6 +179,27 @@ class WallpaperEngine:
             self._log(f"Error generando thumbnail: {e}")
             return ""
 
+    def ping_service(self) -> bool:
+        """Envía un ping al servicio para verificar que está vivo."""
+        return self._send_command_to_service({"action": "ping"})
+
+    def get_service_status(self) -> dict | None:
+        """Obtiene el estado del servicio de wallpapers."""
+        try:
+            sock = QLocalSocket()
+            sock.connectToServer(WALLPAPER_SERVER_NAME)
+            if not sock.waitForConnected(300):
+                return None
+
+            payload = json.dumps({"action": "status"}).encode("utf-8")
+            sock.write(payload)
+            sock.flush()
+            sock.waitForBytesWritten(500)
+            sock.disconnectFromServer()
+            return {"service": "alive"}
+        except Exception:
+            return None
+
     def update_settings(self, config):
         """Actualiza la configuración de los wallpapers activos"""
 
@@ -231,9 +255,17 @@ class WallpaperEngine:
             else:
                 paused_val = bool(paused_override) or global_paused
 
+            speed = ms.get("speed", 1.0)
+            try:
+                speed = float(speed)
+            except Exception:
+                speed = 1.0
+            speed = max(MIN_RATE, min(HARD_MAX_RATE, speed))
+
             per_screen[str(idx)] = {
                 "volume": vol,
                 "paused": paused_val,
+                "speed": speed,
             }
 
         msg = {

@@ -829,10 +829,44 @@ class MainWindow(QMainWindow):
         self.monitor_pause_chk.setChecked(bool(self._get_monitor_settings(self.selected_screen).get("paused", False)))
         ms_layout.addWidget(self.monitor_pause_chk)
 
+        row_speed = QHBoxLayout()
+        row_speed.setSpacing(10)
+        lbl_speed = QLabel("Velocidad:")
+        lbl_speed.setStyleSheet(f"color: {self.colors['text_secondary']}; background: transparent;")
+        self.monitor_speed_slider = QSlider(Qt.Orientation.Horizontal)
+
+        self.monitor_speed_slider.setRange(2, 40)
+        current_speed = self._get_monitor_settings(self.selected_screen).get("speed", 1.0)
+        try:
+            current_speed = float(current_speed)
+        except Exception:
+            current_speed = 1.0
+
+        slider_value = int(current_speed * 10)
+        slider_value = max(2, min(40, slider_value))
+        self.monitor_speed_slider.setValue(slider_value)
+        self.monitor_speed_val = QLabel(f"{current_speed:.2f}x")
+        self.monitor_speed_val.setStyleSheet(f"color: {self.colors['text_secondary']}; background: transparent;")
+        row_speed.addWidget(lbl_speed)
+        row_speed.addWidget(self.monitor_speed_slider)
+        row_speed.addWidget(self.monitor_speed_val)
+        ms_layout.addLayout(row_speed)
+
         def _on_monitor_volume_change(value: int):
             self.monitor_vol_val.setText(f"{value}%")
             ms = self._get_monitor_settings(self.selected_screen)
             ms["volume"] = int(value)
+            self._set_monitor_settings(self.selected_screen, ms)
+            self._save_config()
+            self.engine.update_settings(self.config)
+
+        def _on_monitor_speed_change(value: int):
+
+            speed = value / 10.0
+            speed = max(0.25, min(2.5, speed))
+            self.monitor_speed_val.setText(f"{speed:.2f}x")
+            ms = self._get_monitor_settings(self.selected_screen)
+            ms["speed"] = float(speed)
             self._set_monitor_settings(self.selected_screen, ms)
             self._save_config()
             self.engine.update_settings(self.config)
@@ -845,6 +879,7 @@ class MainWindow(QMainWindow):
             self.engine.update_settings(self.config)
 
         self.monitor_vol_slider.valueChanged.connect(_on_monitor_volume_change)
+        self.monitor_speed_slider.valueChanged.connect(_on_monitor_speed_change)
         self.monitor_pause_chk.toggled.connect(_on_monitor_pause_toggle)
 
         preview_layout.addWidget(monitor_settings_frame)
@@ -991,6 +1026,24 @@ class MainWindow(QMainWindow):
             self.monitor_vol_slider.blockSignals(False)
         if hasattr(self, "monitor_vol_val"):
             self.monitor_vol_val.setText(f"{self._get_effective_volume_for_screen(index)}%")
+        if hasattr(self, "monitor_speed_slider"):
+            self.monitor_speed_slider.blockSignals(True)
+            current_speed = self._get_monitor_settings(index).get("speed", 1.0)
+            try:
+                current_speed = float(current_speed)
+            except Exception:
+                current_speed = 1.0
+            slider_value = int(current_speed * 10)
+            slider_value = max(2, min(40, slider_value))
+            self.monitor_speed_slider.setValue(slider_value)
+            self.monitor_speed_slider.blockSignals(False)
+        if hasattr(self, "monitor_speed_val"):
+            current_speed = self._get_monitor_settings(index).get("speed", 1.0)
+            try:
+                current_speed = float(current_speed)
+            except Exception:
+                current_speed = 1.0
+            self.monitor_speed_val.setText(f"{current_speed:.2f}x")
         if hasattr(self, "monitor_pause_chk"):
             self.monitor_pause_chk.blockSignals(True)
             self.monitor_pause_chk.setChecked(bool(self._get_monitor_settings(index).get("paused", False)))

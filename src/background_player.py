@@ -115,6 +115,11 @@ GNOME_WALLPAPER_DEFAULT_MODE = "static"  # static evita parpadeo en overview/tas
 
 CONFIG_PATH = Path.home() / ".config" / "komorebi" / "config.json"
 
+# Límites seguros de velocidad (libVLC se vuelve inestable por encima de ~2.4x)
+MIN_RATE = 0.25
+SAFE_MAX_RATE = 2.0
+HARD_MAX_RATE = 2.5
+
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +165,7 @@ def _normalize_monitor_entry(entry: dict) -> dict:
     out.setdefault("volume", 0)
     out.setdefault("pause_on_max", False)
     out.setdefault("paused", False)
+    out.setdefault("speed", 1.0)
     return out
 
 
@@ -171,6 +177,7 @@ def _upsert_monitor_config(
     volume: int,
     pause_on_max: bool,
     paused: bool,
+    speed: float = 1.0,
 ) -> None:
     data = _load_config()
     monitors = [_normalize_monitor_entry(m) for m in (data.get("monitors") or []) if isinstance(m, dict)]
@@ -187,6 +194,7 @@ def _upsert_monitor_config(
                     "volume": int(volume),
                     "pause_on_max": bool(pause_on_max),
                     "paused": bool(paused),
+                    "speed": float(speed),
                 }
             )
             matched = True
@@ -204,6 +212,7 @@ def _upsert_monitor_config(
                         "volume": int(volume),
                         "pause_on_max": bool(pause_on_max),
                         "paused": bool(paused),
+                        "speed": float(speed),
                     }
                 )
                 matched = True
@@ -219,6 +228,7 @@ def _upsert_monitor_config(
                 "volume": int(volume),
                 "pause_on_max": bool(pause_on_max),
                 "paused": bool(paused),
+                "speed": float(speed),
             }
         )
 
@@ -481,10 +491,23 @@ class BackgroundPlayer(QWidget):
         self.paused = bool(paused)
         self._user_paused = bool(paused)
         self._start_position = start_position
+        self.speed = 1.0
 
         self._xprop_failed_count = 0
         self.screen_name = None
         self.is_suspended = False
+
+
+        self._idle_mode = False
+        self._last_activity = time.time()
+        self._idle_threshold_ms = 60000  
+        
+        self._xprop_cache = (None, 0.0)  
+        self._xprop_cache_ttl_ms = 2000  
+        
+        # Cache adicional para _NET_WM_STATE: más agresivo (5s)
+        self._wm_state_cache = (None, 0.0)  # (is_maximized, timestamp)
+        self._wm_state_cache_ttl_ms = 5000  # 5s TTL
 
         self.gnome_interface = QDBusInterface(
     "org.gnome.Shell",
@@ -528,7 +551,8 @@ class BackgroundPlayer(QWidget):
 
         self.screen_timer = QTimer(self)
         self.screen_timer.timeout.connect(self._check_screen_alive)
-        self.screen_timer.start(10000)
+        self._update_screen_timer_interval()
+        self.screen_timer.start()
 
         self.monitor_timer: QTimer | None = None
         self._check_count = 0
@@ -536,12 +560,139 @@ class BackgroundPlayer(QWidget):
             self.monitor_timer = QTimer(self)
             self.monitor_timer.timeout.connect(self._check_maximized_window)
 
+    def _update_screen_timer_interval(self) -> None:
+        """Ajusta el intervalo del timer según si está en idle o no."""
+        interval_ms = 30000 if self._idle_mode else 10000
+        self.screen_timer.setInterval(interval_ms)
+
+    def _mark_activity(self) -> None:
+        """Marca actividad visible y sale del modo idle si es necesario."""
+        now = time.time() * 1000  # ms
+        self._last_activity = now
+        if self._idle_mode:
+            self._idle_mode = False
+            self._update_screen_timer_interval()
+            _log(f"Pantalla {self.screen_index}: Saliendo de modo idle")
+
+    def _check_idle_status(self) -> None:
+        """Verifica si la ventana lleva inactiva demasiado tiempo y entra en idle."""
+        if self.is_suspended or self._user_paused:
+            return
+        
+        now = time.time() * 1000
+        inactive_ms = now - self._last_activity
+        
+        # Si no es visible y ha pasado el threshold, entrar en idle
+        should_idle = (
+            (not self.isVisible() or 
+             (self.windowState() & Qt.WindowState.WindowMinimized)) and
+            inactive_ms >= self._idle_threshold_ms
+        )
+        
+        if should_idle and not self._idle_mode:
+            self._idle_mode = True
+            self._update_screen_timer_interval()
+            _log(f"Pantalla {self.screen_index}: Entrando en modo idle (inactiva {inactive_ms/1000:.1f}s)")
+        elif not should_idle and self._idle_mode:
+            self._idle_mode = False
+            self._update_screen_timer_interval()
+
+    def _get_active_window_cached(self) -> str | None:
+        """Retorna active window ID desde xprop, con caché de 2s."""
+        now = time.time() * 1000
+        cached_result, cached_time = self._xprop_cache
+        
+        # Si está en caché y no ha expirado, devolverlo
+        if cached_result is not None and (now - cached_time) < self._xprop_cache_ttl_ms:
+            return cached_result
+        
+        try:
+            res = subprocess.check_output(
+                ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
+                stderr=subprocess.DEVNULL,
+                timeout=0.4
+            ).decode()
+            if "window id #" in res:
+                wid = res.split("#")[1].split(",")[0].strip()
+                self._xprop_cache = (wid, now)
+                return wid
+        except Exception:
+            pass
+        
+        self._xprop_cache = (None, now)
+        return None
+
+    def _reapply_speed(self) -> None:
+        """Reaplicar velocidad actual tras eventos de lifecycle.
+        
+        Evita que VLC vuelva a 1.0x silenciosamente tras set_media, play, resume.
+        """
+        if self._vlc_player is None or self.speed <= 0:
+            return
+        real_speed = self._apply_speed_safely(self.speed)
+        self.speed = real_speed
+
+    def _apply_speed_safely(self, requested: float) -> float:
+        """Aplica velocidad con validación y fallback seguro.
+
+        - Clampa al rango permitido (MIN_RATE..HARD_MAX_RATE).
+        - Verifica aceptación vía retorno y get_rate().
+        - Si falla, cae a SAFE_MAX_RATE sin reiniciar ni pausar.
+        """
+        try:
+            target = float(requested)
+        except Exception:
+            target = 1.0
+
+        target = max(MIN_RATE, min(HARD_MAX_RATE, target))
+        applied = target
+
+        player = self._vlc_player
+        if player is None:
+            return applied
+
+        result = None
+        try:
+            result = player.set_rate(target)
+        except Exception:
+            result = -1
+
+        try:
+            actual = float(player.get_rate() or 0.0)
+        except Exception:
+            actual = 0.0
+
+        success_res = (result is None) or (isinstance(result, (int, float)) and result >= 0)
+        close_enough = actual > 0 and abs(actual - target) <= max(0.1, 0.15 * target)
+
+        if success_res and close_enough:
+            return actual
+
+        fallback = SAFE_MAX_RATE if target > SAFE_MAX_RATE else target
+        try:
+            player.set_rate(fallback)
+        except Exception:
+            pass
+
+        try:
+            actual_fb = float(player.get_rate() or 0.0)
+        except Exception:
+            actual_fb = 0.0
+
+        if actual_fb > 0:
+            applied = actual_fb
+        else:
+            applied = fallback
+
+        return applied
+
     def apply_runtime_settings(
         self,
         *,
         volume: int | None = None,
         paused: bool | None = None,
         pause_on_max: bool | None = None,
+        speed: float | None = None,
     ) -> None:
         if volume is not None:
             try:
@@ -553,6 +704,9 @@ class BackgroundPlayer(QWidget):
                     self._vlc_player.audio_set_volume(max(0, min(100, int(self.volume))))
             except Exception:
                 pass
+
+        if speed is not None:
+            self.speed = self._apply_speed_safely(speed)
 
         if pause_on_max is not None:
             self.pause_on_max = bool(pause_on_max)
@@ -714,6 +868,8 @@ class BackgroundPlayer(QWidget):
         
         self._vlc_player.set_media(media)
         self._vlc_media = media
+        # VLC resetea rate a 1.0 al setear media; reaplicar después.
+        QTimer.singleShot(50, self._reapply_speed)
 
     def _mark_playback_ready(self):
         if self._playback_ready:
@@ -859,6 +1015,9 @@ class BackgroundPlayer(QWidget):
         except Exception as e:
             _log(f"ERROR VLC play(): {e}")
             return
+        
+        # Reaplicar velocidad tras play().
+        QTimer.singleShot(100, self._reapply_speed)
         
         if self._startup_pause_pending:
             self._startup_pause_pending = False
@@ -1131,6 +1290,8 @@ class BackgroundPlayer(QWidget):
             self.show()
             self.lower()
 
+        self._check_idle_status()
+
     def _setup_window(self):
 
         try:
@@ -1367,6 +1528,8 @@ class BackgroundPlayer(QWidget):
         except Exception:
             pass
         _log(f"Pantalla {self.screen_index} reanudada")
+        # Reaplicar velocidad tras reanudar.
+        QTimer.singleShot(75, self._reapply_speed)
 
     def _check_maximized_window(self):
         if not self._playback_ready:
@@ -1399,12 +1562,20 @@ class BackgroundPlayer(QWidget):
             
             if not method_ok and self._xprop_failed_count <= 5:
                 try:
-                    res = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL, timeout=0.4).decode()
-                    if "window id #" in res:
-                        wid = res.split("#")[1].split(",")[0].strip()
-                        if wid != "0x0":
+                    # Usar caché de WM_STATE para reducir subprocess calls
+                    now = time.time() * 1000
+                    cached_is_max, cached_time = self._wm_state_cache
+                    
+                    # Si está en caché y no ha expirado, usar valor cacheado
+                    if cached_is_max is not None and (now - cached_time) < self._wm_state_cache_ttl_ms:
+                        is_maximized = cached_is_max
+                    else:
+                        # Hacer consulta fresca
+                        wid = self._get_active_window_cached()
+                        if wid and wid != "0x0":
                             state = subprocess.check_output(["xprop", "-id", wid, "_NET_WM_STATE"], stderr=subprocess.DEVNULL, timeout=0.4).decode()
                             is_maximized = "_NET_WM_STATE_MAXIMIZED_VERT" in state and "_NET_WM_STATE_MAXIMIZED_HORZ" in state
+                        self._wm_state_cache = (is_maximized, now)
                     self._xprop_failed_count = 0
                 except: 
                     self._xprop_failed_count += 1
@@ -1416,6 +1587,8 @@ class BackgroundPlayer(QWidget):
             self._maximized_active = False
             if self.is_suspended and not self._user_paused:
                 self._resume_video()
+
+        self._check_idle_status()
 
 
 class WallpaperService(QApplication):
@@ -1741,6 +1914,26 @@ class WallpaperService(QApplication):
             self._stop_player(screen)
         elif action == "update":
             self._update_players(cmd)
+        elif action == "ping":
+            _log("Ping recibido: servicio activo")
+        elif action == "status":
+ 
+            status = {
+                "service": "alive",
+                "players_count": len(self.players),
+                "players": {
+                    str(idx): {
+                        "screen_index": player.screen_index,
+                        "screen_name": player.screen_name,
+                        "paused": player.is_suspended or player._user_paused,
+                        "volume": player.volume,
+                        "video_path": player.video_path,
+                        "rate": getattr(player, "speed", 1.0),
+                    }
+                    for idx, player in self.players.items()
+                }
+            }
+            _log(f"Status: {json.dumps(status)}")
         elif action == "quit":
             self._stop_gnome_wallpaper_sync(restore=True)
             self.quit()
@@ -1763,6 +1956,7 @@ class WallpaperService(QApplication):
                 volume=payload.get("volume", None),
                 paused=payload.get("paused", None),
                 pause_on_max=(global_pause_on_max if global_pause_on_max is not None else payload.get("pause_on_max", None)),
+                speed=payload.get("speed", None),
             )
             try:
                 _upsert_monitor_config(
@@ -1772,6 +1966,7 @@ class WallpaperService(QApplication):
                     volume=int(getattr(player, "volume", 0)),
                     pause_on_max=bool(getattr(player, "pause_on_max", False)),
                     paused=bool(getattr(player, "paused", False)),
+                    speed=float(getattr(player, "speed", 1.0)),
                 )
             except Exception:
                 pass
@@ -1795,6 +1990,7 @@ class WallpaperService(QApplication):
             "volume": cmd.get("volume", None),
             "paused": cmd.get("paused", None),
             "pause_on_max": cmd.get("pause_on_max", None),
+            "speed": cmd.get("speed", None),
         }
 
         if idx == -1:
@@ -1855,6 +2051,14 @@ class WallpaperService(QApplication):
 
         if old_player is not None:
             try:
+                # Pausar el player antiguo para congelar su último frame visual.
+                # Luego destruirlo suavemente con fade.
+                try:
+                    if old_player._vlc_player is not None:
+                        old_player._vlc_player.set_pause(1)
+                except Exception:
+                    pass
+
                 old_player.setWindowOpacity(1.0)
                 anim = QPropertyAnimation(old_player, b"windowOpacity")
                 anim.setDuration(250)
@@ -1870,7 +2074,6 @@ class WallpaperService(QApplication):
 
                 anim.finished.connect(_after_fade)
                 anim.start()
-                # Evitar GC del animation
                 setattr(old_player, "_swap_fade_anim", anim)
                 return
             except Exception:
