@@ -90,7 +90,6 @@ _VLC_PLUGIN_PATH = _configure_vlc_env()
 
 _MONITOR_CACHE = {"data": [], "timestamp": 0, "min_interval": 5.0}
 
-# Configurar QT_QPA_PLATFORM según la sesión
 _session_type = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
 
 _force_xcb = os.environ.get("KOMOREBI_FORCE_XCB", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -111,11 +110,11 @@ GNOME_WALLPAPER_MAX_DIMENSION = 480
 GNOME_WALLPAPER_DIR = Path("/dev/shm/komorebi-sync")
 GNOME_WALLPAPER_BASENAME = "komorebi-wallpaper"
 GNOME_WALLPAPER_SYNC_STARTUP_DELAY_MS = 1200
-GNOME_WALLPAPER_DEFAULT_MODE = "static"  # static evita parpadeo en overview/task view
+GNOME_WALLPAPER_DEFAULT_MODE = "static"
 
 CONFIG_PATH = Path.home() / ".config" / "komorebi" / "config.json"
 
-# Límites seguros de velocidad (libVLC se vuelve inestable por encima de ~2.4x)
+
 MIN_RATE = 0.25
 SAFE_MAX_RATE = 2.0
 HARD_MAX_RATE = 2.5
@@ -249,16 +248,6 @@ def _disable_monitor_config(*, screen_index: int, screen_name: str | None) -> No
 
 
 def _xrandr_monitors(force_refresh: bool = False) -> list[dict]:
-    """Retorna monitores desde `xrandr --listmonitors` con cache inteligente.
-    
-    Formato típico:
-      Monitors: 2
-       0: +*eDP-1 1920/344x1080/194+0+0  eDP-1
-       1: +HDMI-1 1920/477x1080/268+1920+0  HDMI-1
-    
-    Args:
-        force_refresh: Si True, ignora cache y consulta xrandr inmediatamente
-    """
     now = time.time()
 
     if not force_refresh and (now - _MONITOR_CACHE["timestamp"]) < _MONITOR_CACHE["min_interval"]:
@@ -267,8 +256,14 @@ def _xrandr_monitors(force_refresh: bool = False) -> list[dict]:
     if not shutil.which("xrandr"):
         return []
     try:
-        out = subprocess.check_output(["xrandr", "--listmonitors"], text=True, stderr=subprocess.STDOUT)
-    except Exception:
+        out = subprocess.check_output(
+            ["xrandr", "--listmonitors"], 
+            text=True, 
+            stderr=subprocess.STDOUT,
+            timeout=2
+        )
+    except Exception as e:
+        _log(f" Error ejecutando xrandr: {e}")
         return _MONITOR_CACHE["data"]
 
     monitors: list[dict] = []
@@ -299,8 +294,10 @@ def _xrandr_monitors(force_refresh: bool = False) -> list[dict]:
             }
         )
     
-    _MONITOR_CACHE["data"] = monitors
-    _MONITOR_CACHE["timestamp"] = now
+    if monitors:
+        _MONITOR_CACHE["data"] = monitors
+        _MONITOR_CACHE["timestamp"] = now
+    
     return monitors
 
 
@@ -397,7 +394,7 @@ def check_session_type():
     is_gnome_env = is_gnome()
     session_type = "Wayland" if session == "wayland" else "X11"
     desktop = "GNOME" if is_gnome_env else os.environ.get('XDG_CURRENT_DESKTOP', 'Desconocido')
-    _log(f"🖥️ Sesión detectada: {desktop} ({session_type})")
+    _log(f" Sesión detectada: {desktop} ({session_type})")
     return session, is_gnome_env
 
 
@@ -1001,13 +998,21 @@ class BackgroundPlayer(QWidget):
         except Exception:
             pass
 
-        self.setWindowOpacity(0.0)
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
-        self._fade_anim.setDuration(1200)
-        self._fade_anim.setStartValue(0.0)
-        self._fade_anim.setEndValue(1.0)
-        self._fade_anim.setEasingCurve(QEasingCurve.InOutQuad)
-        self._fade_anim.start()
+        # Hacer ventana completamente visible - sin animación en Wayland
+        self.setWindowOpacity(1.0)
+        
+        # Forzar ventana al fondo repetidamente
+        for i in range(50):
+            QTimer.singleShot(i * 50, self.lower)
+        
+        # Continuar forzando al fondo
+        def keep_lowering():
+            if self.isVisible():
+                self.lower()
+        
+        self._lower_timer = QTimer(self)
+        self._lower_timer.timeout.connect(keep_lowering)
+        self._lower_timer.start(500)
 
         try:
             rc = self._vlc_player.play()
@@ -1214,8 +1219,20 @@ class BackgroundPlayer(QWidget):
 
     def _check_screen_alive(self):
         screens = QGuiApplication.screens()
-        xmon = _xrandr_monitors(force_refresh=False)  # Usar cache
+        xmon = _xrandr_monitors(force_refresh=False)
         use_xrandr_layout = len(xmon) > 1 and len(screens) <= 1
+
+        if self.windowHandle():
+            current_screen = self.windowHandle().screen()
+            if current_screen:
+                geo = current_screen.geometry()
+                window_geo = self.geometry()
+                
+                if (abs(window_geo.width() - geo.width()) > 50 or 
+                    abs(window_geo.height() - geo.height()) > 50):
+                    _log(f"⚠️ Geometría cambió en pantalla {self.screen_index}")
+                    self._update_geometry(geo)
+                    self._schedule_crop(reset=True)
 
         if self.screen_name:
             found_index = -1
@@ -1225,9 +1242,7 @@ class BackgroundPlayer(QWidget):
                     break
 
             if found_index != -1 and found_index != self.screen_index:
-                _log(
-                    f"Pantalla '{self.screen_name}' movida de índice {self.screen_index} a {found_index}. Actualizando."
-                )
+                _log(f"🔄 Pantalla '{self.screen_name}' movida de {self.screen_index} a {found_index}")
                 self.screen_index = found_index
                 if self.windowHandle():
                     self.windowHandle().setScreen(screens[found_index])
@@ -1238,17 +1253,16 @@ class BackgroundPlayer(QWidget):
 
         qt_has = self.screen_index < len(screens)
         xr_has = self.screen_index < len(xmon)
+        
         if not qt_has and not xr_has:
             self.missing_screen_count = getattr(self, "missing_screen_count", 0) + 1
-            _log(
-                f"Advertencia: Pantalla {self.screen_index} ({self.screen_name}) no detectada (intento {self.missing_screen_count}/3)"
-            )
+            _log(f"⚠️ Pantalla {self.screen_index} no detectada ({self.missing_screen_count}/2)")
 
-            if self.missing_screen_count >= 3:
-                _log(f"Pantalla {self.screen_index} desconectada permanentemente. Cerrando ventana.")
+            if self.missing_screen_count >= 2:
+                _log(f"❌ Auto-destruyendo player {self.screen_index}")
                 self.close()
                 self.deleteLater()
-            return
+                return
         else:
             self.missing_screen_count = 0
 
@@ -1265,28 +1279,22 @@ class BackgroundPlayer(QWidget):
         if window_handle and current_screen is not None:
             assigned_screen = window_handle.screen()
             if assigned_screen != current_screen:
-                _log(f"Pantalla desincronizada. Reasignando a pantalla {self.screen_index}")
+                _log(f" Reasignando a pantalla {self.screen_index}")
                 window_handle.setScreen(current_screen)
                 self._update_geometry(current_screen.geometry())
                 self._schedule_crop(reset=True)
         elif xr_has and (use_xrandr_layout or not qt_has):
             xm = xmon[self.screen_index]
-            if (
-                self.geometry().x() != xm["x"]
-                or self.geometry().y() != xm["y"]
-                or self.width() != xm["w"]
-                or self.height() != xm["h"]
-            ):
+            if (self.geometry().x() != xm["x"] or self.geometry().y() != xm["y"] or
+                self.width() != xm["w"] or self.height() != xm["h"]):
                 self.setGeometry(xm["x"], xm["y"], xm["w"], xm["h"])
                 self.setFixedSize(xm["w"], xm["h"])
                 self.move(xm["x"], xm["y"])
-                _log(
-                    f"Actualizando geometría (xrandr) pantalla {self.screen_index}: {xm['x']},{xm['y']} {xm['w']}x{xm['h']}"
-                )
+                _log(f" Geometría (xrandr) {self.screen_index}: {xm['x']},{xm['y']} {xm['w']}x{xm['h']}")
                 self._schedule_crop(reset=True)
 
         if not self.isVisible() and not (self.windowState() & Qt.WindowState.WindowMinimized):
-            _log("Ventana oculta detectada. Forzando show().")
+            _log(f" Ventana {self.screen_index} oculta. Forzando show()")
             self.show()
             self.lower()
 
@@ -1598,6 +1606,7 @@ class WallpaperService(QApplication):
         self.setQuitOnLastWindowClosed(False)
 
         self.players: dict[int, BackgroundPlayer] = {}
+        self._monitor_layout_hash = ""
 
         try:
             self.vlc_instance = BackgroundPlayer._create_vlc_instance()
@@ -1633,10 +1642,11 @@ class WallpaperService(QApplication):
         if self.primary_screen:
             self.primary_screen.geometryChanged.connect(self._on_global_screen_change)
         self.screenRemoved.connect(self._on_screen_removed)
-        try:
-            self.screenAdded.connect(self._on_screen_added)
-        except Exception:
-            pass
+        self.screenAdded.connect(self._on_screen_added)
+
+        self._layout_monitor_timer = QTimer(self)
+        self._layout_monitor_timer.timeout.connect(self._check_layout_changes)
+        self._layout_monitor_timer.start(3000)
 
         if self.server.listen(SERVER_NAME):
             _log(f"Servidor iniciado en socket: {SERVER_NAME}")
@@ -1645,6 +1655,47 @@ class WallpaperService(QApplication):
             _log(f"Error iniciando servidor: {self.server.errorString()}")
 
         QTimer.singleShot(0, self._autoload_from_config)
+
+    def _compute_monitor_layout_hash(self) -> str:
+        inv = _current_monitor_inventory()
+        layout_str = "|".join([
+            f"{m.get('name', '')}:{m.get('x', 0)},{m.get('y', 0)},{m.get('w', 0)}x{m.get('h', 0)}"
+            for m in sorted(inv, key=lambda x: x.get('index', 0))
+        ])
+        import hashlib
+        return hashlib.md5(layout_str.encode()).hexdigest()
+
+    def _check_layout_changes(self):
+        current_hash = self._compute_monitor_layout_hash()
+        
+        if not self._monitor_layout_hash:
+            self._monitor_layout_hash = current_hash
+            return
+            
+        if current_hash != self._monitor_layout_hash:
+            _log(f" Layout de monitores cambió: {self._monitor_layout_hash[:8]} -> {current_hash[:8]}")
+            self._monitor_layout_hash = current_hash
+            _xrandr_monitors(force_refresh=True)
+            self._cleanup_orphaned_players()
+            QTimer.singleShot(1500, self._autoload_from_config)
+
+    def _cleanup_orphaned_players(self):
+        inv = _current_monitor_inventory()
+        valid_indices = {m['index'] for m in inv}
+        valid_names = {m['name'] for m in inv if m.get('name')}
+        
+        to_remove = []
+        for idx, player in list(self.players.items()):
+            if idx not in valid_indices:
+                to_remove.append(idx)
+                continue
+            if player.screen_name and player.screen_name not in valid_names:
+                to_remove.append(idx)
+                continue
+        
+        for idx in to_remove:
+            _log(f" Eliminando player huérfano {idx}")
+            self._stop_player(idx, persist_disable=False)
 
     def _resolve_config_entry_to_screen_index(self, entry: dict) -> int | None:
         entry = _normalize_monitor_entry(entry)
@@ -1672,6 +1723,10 @@ class WallpaperService(QApplication):
         if not monitors:
             return
 
+        _xrandr_monitors(force_refresh=True)
+        inv = _current_monitor_inventory()
+        valid_indices = {m['index'] for m in inv}
+
         started = 0
         for entry in monitors:
             if not entry.get("enabled", True):
@@ -1683,9 +1738,14 @@ class WallpaperService(QApplication):
             resolved = self._resolve_config_entry_to_screen_index(entry)
             if resolved is None:
                 continue
+                
+            if resolved not in valid_indices:
+                _log(f" Saltando monitor {resolved}: no existe en layout actual")
+                continue
 
             if resolved in self.players:
-                continue
+                _log(f" Recreando player {resolved}")
+                self._stop_player(resolved, persist_disable=False)
 
             self._start_player(
                 str(video_path),
@@ -1698,17 +1758,17 @@ class WallpaperService(QApplication):
             started += 1
 
         if started:
-            _log(f"Autoload config: iniciados {started} player(s) desde {CONFIG_PATH}")
+            _log(f"✅ Autoload: {started} player(s) iniciados")
 
     def _on_screen_added(self, screen):
         try:
-            _log(f"Evento global: Pantalla conectada: {screen.name()}")
+            _log(f"➕ Pantalla conectada: {screen.name()}")
         except Exception:
-            _log("Evento global: Pantalla conectada")
+            _log("➕ Pantalla conectada")
         
         _xrandr_monitors(force_refresh=True)
-        
-        QTimer.singleShot(250, self._autoload_from_config)
+        self._monitor_layout_hash = self._compute_monitor_layout_hash()
+        QTimer.singleShot(2000, self._autoload_from_config)
 
     def _start_gnome_wallpaper_sync(self):
         if not self._gnome_wallpaper_enabled:
@@ -1866,22 +1926,22 @@ class WallpaperService(QApplication):
             player._check_screen_alive()
 
     def _on_screen_removed(self, screen):
-        _log(f"Evento global: Pantalla desconectada: {screen.name()}")
-        
+        _log(f"➖ Pantalla desconectada: {screen.name()}")
         _xrandr_monitors(force_refresh=True)
+        self._monitor_layout_hash = self._compute_monitor_layout_hash()
         
         to_remove = []
-        for idx, player in self.players.items():
+        for idx, player in list(self.players.items()):
             if player.screen_name == screen.name():
                 to_remove.append(idx)
             elif player.windowHandle() and player.windowHandle().screen() == screen:
                 to_remove.append(idx)
 
         for idx in to_remove:
-            _log(f"Cerrando player {idx} por desconexión de pantalla {screen.name()}.")
-            self._stop_player(idx)
+            _log(f" Cerrando player {idx}")
+            self._stop_player(idx, persist_disable=False)
 
-        QTimer.singleShot(500, lambda: [p._check_screen_alive() for p in self.players.values()])
+        QTimer.singleShot(500, self._cleanup_orphaned_players)
 
     def _handle_new_connection(self):
         socket = self.server.nextPendingConnection()

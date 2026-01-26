@@ -15,6 +15,20 @@ from PySide6.QtGui import QPixmap, QImage, QGuiApplication, QAction, QDesktopSer
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from src.engine import WallpaperEngine
+from datetime import datetime
+
+
+def _log(msg: str):
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        log_file = Path("/dev/shm/komorebi_gui.log")
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.write("\n")
+    except Exception:
+        pass
 
 
 def _get_xdg_videos_dir() -> str:
@@ -393,6 +407,8 @@ class MainWindow(QMainWindow):
         self.shuffle_timer = QTimer(self)
         self.shuffle_timer.timeout.connect(self._shuffle_tick)
         self._ensure_shuffle_timer()
+
+        self._init_monitor_sync()
 
     def _ensure_shuffle_timer(self):
         enabled = bool(self.config.get("shuffle_enabled", False))
@@ -996,24 +1012,65 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_screens_changed(self, screen):
-        """Maneja cambios en monitores (conexión/desconexión)"""
+        _log(f" Cambio de pantallas detectado")
+        
         if hasattr(self, '_restore_timer') and self._restore_timer.isActive():
             self._restore_timer.stop()
+        
+        try:
+            self.engine.ping_service()
+        except Exception:
+            pass
             
         self._restore_timer = QTimer()
         self._restore_timer.setSingleShot(True)
         self._restore_timer.timeout.connect(self._delayed_restore)
-        self._restore_timer.start(2000)
+        self._restore_timer.start(2500)
 
     def _delayed_restore(self):
-        # Reinicia players para re-asociar índices tras cambios de monitores.
-        self.engine.stop()
-
         QTimer.singleShot(500, self._execute_restore)
 
     def _execute_restore(self):
+        _log(" Ejecutando restauración de monitores")
+        
         self._refresh_monitor_buttons()
-        self.restore_wallpapers()
+        
+        current_screens = self.engine.get_screen_count()
+        wallpapers = self.config.get("wallpapers", {})
+        
+        for screen_str, video_path in wallpapers.items():
+            try:
+                idx = int(screen_str)
+                if idx < current_screens and os.path.exists(video_path):
+                    status = self.engine.get_service_status()
+                    if status and status.get("service") == "alive":
+                        if hasattr(self, 'monitor_widgets') and idx < len(self.monitor_widgets):
+                            self._update_monitor_button(idx, video_path)
+            except Exception as e:
+                _log(f" Error en restore para pantalla {screen_str}: {e}")
+
+    def _init_monitor_sync(self):
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._sync_monitor_status)
+        self._sync_timer.start(5000)
+
+    def _sync_monitor_status(self):
+        try:
+            status = self.engine.get_service_status()
+            if not status or status.get("service") != "alive":
+                return
+                
+            players = status.get("players", {})
+            for screen_str, info in players.items():
+                try:
+                    idx = int(screen_str)
+                    video_path = info.get("video_path")
+                    if video_path and hasattr(self, 'monitor_widgets') and idx < len(self.monitor_widgets):
+                        self._update_monitor_button(idx, video_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            _log(f" Error en sync: {e}")
 
     def _select_monitor(self, index):
         self.selected_screen = index
